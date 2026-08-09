@@ -140,6 +140,29 @@ impl Config {
         self
     }
 
+    /// Run generation. Call this at the end of your `build.rs`.
+    pub fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        for root in &self.scans {
+            println!("cargo::rerun-if-changed={}", root.display());
+        }
+        println!("cargo::rerun-if-env-changed=TS_TYPEGEN_CHECK");
+
+        match crate::run::generate(&self) {
+            Ok(outcome) => {
+                for name in &outcome.report.removed {
+                    println!("cargo::warning=ts-typegen: removed stale binding {name}");
+                }
+                Ok(())
+            }
+            Err(e) => {
+                for line in format!("{e}").lines() {
+                    println!("cargo::warning=ts-typegen: {line}");
+                }
+                Err(e)
+            }
+        }
+    }
+
     // Readers. Named apart from the setters above, which already own the
     // obvious names.
     pub fn scans(&self) -> &[PathBuf] {
