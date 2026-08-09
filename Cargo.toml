@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/ts-typegen", "crates/ts-typegen-macros", "crates/ts-typegen-build"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Andrew-McCall/ts-typegen"
+
+[workspace.dependencies]
+ts-typegen-macros = { version = "0.1.0", path = "crates/ts-typegen-macros" }
+syn = { version = "2", features = ["full", "extra-traits", "visit"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+heck = "0.5"

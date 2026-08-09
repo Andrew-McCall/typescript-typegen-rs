@@ -1,0 +1,15 @@
+[package]
+name = "ts-typegen"
+description = "Generate TypeScript types from Rust structs and enums at build time"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ts-typegen-macros.workspace = true
+
+[features]
+default = []
+strict = []
