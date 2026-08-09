@@ -58,9 +58,13 @@ impl RenameRule {
                 }
                 out
             }
-            Self::Camel => lower_first(&Self::Pascal.apply_to_field(field)),
+            Self::Camel => lower_first(Self::Pascal.apply_to_field(field)),
             Self::Kebab => field.replace('_', "-"),
-            Self::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
+            Self::ScreamingKebab => {
+                let mut out = field.replace('_', "-");
+                out.make_ascii_uppercase();
+                out
+            }
         }
     }
 
@@ -72,34 +76,67 @@ impl RenameRule {
             Self::Pascal => variant.to_owned(),
             Self::Lower => variant.to_ascii_lowercase(),
             Self::Upper => variant.to_ascii_uppercase(),
-            Self::Camel => lower_first(variant),
-            Self::Snake => pascal_to_snake(variant),
-            Self::ScreamingSnake => pascal_to_snake(variant).to_ascii_uppercase(),
-            Self::Kebab => pascal_to_snake(variant).replace('_', "-"),
-            Self::ScreamingKebab => {
-                pascal_to_snake(variant).to_ascii_uppercase().replace('_', "-")
-            }
+            Self::Camel => lower_first(variant.to_owned()),
+            Self::Snake => split_capitals(variant, '_'),
+            Self::Kebab => split_capitals(variant, '-'),
+            Self::ScreamingSnake => shout(split_capitals(variant, '_')),
+            Self::ScreamingKebab => shout(split_capitals(variant, '-')),
         }
     }
 }
 
-fn lower_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-fn pascal_to_snake(variant: &str) -> String {
-    let mut out = String::with_capacity(variant.len());
+/// Splits a `PascalCase` variant at each capital, joining the words with `sep`
+/// and lowercasing as it goes.
+///
+/// The separator is a parameter rather than a post-hoc `replace`, so kebab-case
+/// is built directly in one pass instead of building snake_case and rewriting
+/// it. Uppercasing is left to [`shout`], which works in place.
+///
+/// An underscore already present in the variant is emitted as `sep` too. That
+/// looks like a detail and is not: serde derives kebab-case by replacing *every*
+/// underscore in the snake_case form, so `Key_Press` is `key--press`. Passing
+/// the separator through without this line silently produces `key_-press`.
+fn split_capitals(variant: &str, sep: char) -> String {
+    // Most identifiers gain one or two separators; over-reserving beats
+    // reallocating mid-loop.
+    let mut out = String::with_capacity(variant.len() + 4);
     for (i, ch) in variant.char_indices() {
+        if ch == '_' {
+            out.push(sep);
+            continue;
+        }
         if i > 0 && ch.is_uppercase() {
-            out.push('_');
+            out.push(sep);
         }
         out.extend(ch.to_lowercase());
     }
     out
+}
+
+/// Uppercases in place. Both separators are ASCII and unaffected, so this is
+/// safe to apply after splitting and costs no allocation.
+fn shout(mut s: String) -> String {
+    s.make_ascii_uppercase();
+    s
+}
+
+/// Lowercases the first character, reusing the buffer when it is ASCII — which
+/// covers every practical identifier. The non-ASCII path has to rebuild, since
+/// lowercasing can change a character's UTF-8 length.
+fn lower_first(mut s: String) -> String {
+    match s.chars().next() {
+        Some(c) if c.is_ascii() => {
+            s[..1].make_ascii_lowercase();
+            s
+        }
+        Some(c) => {
+            let mut out = String::with_capacity(s.len());
+            out.extend(c.to_lowercase());
+            out.push_str(&s[c.len_utf8()..]);
+            out
+        }
+        None => s,
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -300,6 +337,25 @@ mod tests {
         assert_eq!(RenameRule::Lower.apply_to_variant("KeyPress"), "keypress");
         assert_eq!(RenameRule::Upper.apply_to_variant("KeyPress"), "KEYPRESS");
         assert_eq!(RenameRule::Pascal.apply_to_variant("KeyPress"), "KeyPress");
+    }
+
+    #[test]
+    fn lowercasing_the_first_char_handles_non_ascii_identifiers() {
+        // Rust identifiers may be non-ASCII, so the in-place fast path must not
+        // be the only path. `İ` is the nasty one: lowercasing it grows the
+        // string from 2 bytes to 3.
+        assert_eq!(RenameRule::Camel.apply_to_variant("Ünit"), "ünit");
+        assert_eq!(RenameRule::Camel.apply_to_variant("İd"), "i\u{307}d");
+        assert_eq!(RenameRule::Camel.apply_to_variant(""), "");
+    }
+
+    #[test]
+    fn a_literal_underscore_becomes_the_separator_too() {
+        // serde derives kebab-case by replacing every underscore in the
+        // snake_case form, so both the literal `_` and the one inserted before
+        // `P` become dashes. Verified against serde_json in case_fidelity.rs.
+        assert_eq!(RenameRule::Kebab.apply_to_variant("Key_Press"), "key--press");
+        assert_eq!(RenameRule::Snake.apply_to_variant("Key_Press"), "key__press");
     }
 
     #[test]

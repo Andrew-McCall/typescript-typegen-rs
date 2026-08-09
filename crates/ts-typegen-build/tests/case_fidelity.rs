@@ -53,18 +53,20 @@ macro_rules! variant_probe {
     ($name:ident, $lit:literal) => {
         #[derive(Serialize)]
         #[serde(rename_all = $lit)]
-        #[allow(dead_code)]
+        #[allow(dead_code, non_camel_case_types)]
         enum $name {
             KeyPress,
             HTTPServer,
             A,
             Resize2D,
             Ok,
+            Key_Press,
         }
     };
 }
 
-const VARIANTS: &[&str] = &["KeyPress", "HTTPServer", "A", "Resize2D", "Ok"];
+const VARIANTS: &[&str] =
+    &["KeyPress", "HTTPServer", "A", "Resize2D", "Ok", "Key_Press"];
 
 variant_probe!(VCamel, "camelCase");
 variant_probe!(VPascal, "PascalCase");
@@ -136,6 +138,7 @@ fn variant_renaming_matches_serde_exactly() {
                 variant_name(VCamel::A),
                 variant_name(VCamel::Resize2D),
                 variant_name(VCamel::Ok),
+                variant_name(VCamel::Key_Press),
             ],
             RenameRule::Camel,
         ),
@@ -147,6 +150,7 @@ fn variant_renaming_matches_serde_exactly() {
                 variant_name(VSnake::A),
                 variant_name(VSnake::Resize2D),
                 variant_name(VSnake::Ok),
+                variant_name(VSnake::Key_Press),
             ],
             RenameRule::Snake,
         ),
@@ -158,6 +162,7 @@ fn variant_renaming_matches_serde_exactly() {
                 variant_name(VKebab::A),
                 variant_name(VKebab::Resize2D),
                 variant_name(VKebab::Ok),
+                variant_name(VKebab::Key_Press),
             ],
             RenameRule::Kebab,
         ),
@@ -169,6 +174,7 @@ fn variant_renaming_matches_serde_exactly() {
                 variant_name(VScreamSnake::A),
                 variant_name(VScreamSnake::Resize2D),
                 variant_name(VScreamSnake::Ok),
+                variant_name(VScreamSnake::Key_Press),
             ],
             RenameRule::ScreamingSnake,
         ),
@@ -180,6 +186,7 @@ fn variant_renaming_matches_serde_exactly() {
                 variant_name(VScreamKebab::A),
                 variant_name(VScreamKebab::Resize2D),
                 variant_name(VScreamKebab::Ok),
+                variant_name(VScreamKebab::Key_Press),
             ],
             RenameRule::ScreamingKebab,
         ),
@@ -191,6 +198,7 @@ fn variant_renaming_matches_serde_exactly() {
                 variant_name(VPascal::A),
                 variant_name(VPascal::Resize2D),
                 variant_name(VPascal::Ok),
+                variant_name(VPascal::Key_Press),
             ],
             RenameRule::Pascal,
         ),
@@ -202,6 +210,7 @@ fn variant_renaming_matches_serde_exactly() {
                 variant_name(VLower::A),
                 variant_name(VLower::Resize2D),
                 variant_name(VLower::Ok),
+                variant_name(VLower::Key_Press),
             ],
             RenameRule::Lower,
         ),
@@ -213,6 +222,7 @@ fn variant_renaming_matches_serde_exactly() {
                 variant_name(VUpper::A),
                 variant_name(VUpper::Resize2D),
                 variant_name(VUpper::Ok),
+                variant_name(VUpper::Key_Press),
             ],
             RenameRule::Upper,
         ),
