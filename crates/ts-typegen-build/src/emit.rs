@@ -4,7 +4,7 @@
 //! integer width, optionality style, interface vs alias — lives here.
 
 use crate::config::{BigInt, Config, OptionalStyle, StructStyle};
-use crate::ir::{Body, Decl, Field, Prim, Ty};
+use crate::ir::{Body, Decl, EnumRepr, Field, Prim, Ty, Variant, VariantKind};
 
 const INDENT: &str = "  ";
 
@@ -166,12 +166,80 @@ pub fn emit_decl(decl: &Decl, cfg: &Config) -> String {
         Body::Enum { .. } => emit_enum(decl, cfg),
     };
 
-    format!("{head}export type {name}{params} = {body};\n")
+    // A multi-arm union body starts with its own newline; emitting "= " there
+    // would leave a trailing space at the end of the line.
+    let sep = if body.starts_with('\n') { "=" } else { "= " };
+    format!("{head}export type {name}{params} {sep}{body};\n")
 }
 
-/// Implemented in Task 9; enums render as `never` until then.
-fn emit_enum(_decl: &Decl, _cfg: &Config) -> String {
-    "never".to_string()
+fn emit_enum(decl: &Decl, cfg: &Config) -> String {
+    let Body::Enum { repr, variants } = &decl.body else {
+        return "never".to_string();
+    };
+
+    if let EnumRepr::UnitOnly = repr {
+        let arms: Vec<String> = variants.iter().map(|v| quoted(&v.ts_name)).collect();
+        return arms.join(" | ");
+    }
+
+    let arms: Vec<String> = variants.iter().map(|v| emit_variant(v, repr, cfg)).collect();
+    match arms.len() {
+        0 => "never".to_string(),
+        1 => arms.into_iter().next().unwrap(),
+        _ => format!("\n{INDENT}| {}", arms.join(&format!("\n{INDENT}| "))),
+    }
+}
+
+fn quoted(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn emit_variant(v: &Variant, repr: &EnumRepr, cfg: &Config) -> String {
+    let tag = quoted(&v.ts_name);
+    match repr {
+        EnumRepr::UnitOnly => tag,
+        EnumRepr::External => match &v.kind {
+            VariantKind::Unit => tag,
+            VariantKind::Newtype(t) => format!("{{ {}: {} }}", v.ts_name, emit_ty(t, cfg)),
+            VariantKind::Tuple(items) => {
+                format!("{{ {}: {} }}", v.ts_name, emit_ty(&Ty::Tuple(items.clone()), cfg))
+            }
+            VariantKind::Struct(fields) => {
+                format!("{{ {}: {} }}", v.ts_name, emit_object_inline(fields, cfg))
+            }
+        },
+        EnumRepr::Internal { tag: key } => match &v.kind {
+            VariantKind::Unit => format!("{{ {key}: {tag} }}"),
+            VariantKind::Struct(fields) => {
+                let mut parts = vec![format!("{key}: {tag}")];
+                for f in fields {
+                    let (q, ty) = optionality(f, cfg);
+                    parts.push(format!("{}{q}: {ty}", f.ts_name));
+                }
+                format!("{{ {} }}", parts.join("; "))
+            }
+            // Diagnosed during parsing; render the tag alone rather than a lie.
+            VariantKind::Newtype(_) | VariantKind::Tuple(_) => format!("{{ {key}: {tag} }}"),
+        },
+        EnumRepr::Adjacent { tag: key, content } => {
+            let payload = match &v.kind {
+                VariantKind::Unit => None,
+                VariantKind::Newtype(t) => Some(emit_ty(t, cfg)),
+                VariantKind::Tuple(items) => Some(emit_ty(&Ty::Tuple(items.clone()), cfg)),
+                VariantKind::Struct(fields) => Some(emit_object_inline(fields, cfg)),
+            };
+            match payload {
+                None => format!("{{ {key}: {tag} }}"),
+                Some(p) => format!("{{ {key}: {tag}; {content}: {p} }}"),
+            }
+        }
+        EnumRepr::Untagged => match &v.kind {
+            VariantKind::Unit => "null".to_string(),
+            VariantKind::Newtype(t) => emit_ty(t, cfg),
+            VariantKind::Tuple(items) => emit_ty(&Ty::Tuple(items.clone()), cfg),
+            VariantKind::Struct(fields) => emit_object_inline(fields, cfg),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -395,5 +463,110 @@ mod tests {
         let d = decl(Body::Struct(vec![f, field("v", Ty::Prim(Prim::Str))]));
         let out = emit_decl(&d, &Config::new());
         assert_eq!(out, "export type X = Base & {\n  v: string;\n};\n");
+    }
+}
+
+#[cfg(test)]
+mod enum_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::ir::{Body, Decl, EnumRepr, Field, Prim, SourceLoc, Ty, Variant, VariantKind};
+
+    fn field(name: &str, ty: Ty) -> Field {
+        Field {
+            rust_name: name.into(),
+            ts_name: name.into(),
+            ty,
+            optional: false,
+            flatten: false,
+            docs: vec![],
+        }
+    }
+
+    fn variant(name: &str, kind: VariantKind) -> Variant {
+        Variant { rust_name: name.into(), ts_name: name.into(), docs: vec![], kind }
+    }
+
+    fn enum_decl(repr: EnumRepr, variants: Vec<Variant>) -> Decl {
+        Decl {
+            rust_path: "crate::X".into(),
+            ts_name: "X".into(),
+            docs: vec![],
+            generics: vec![],
+            body: Body::Enum { repr, variants },
+            loc: SourceLoc { file: "x.rs".into(), line: 1 },
+        }
+    }
+
+    fn sample_variants() -> Vec<Variant> {
+        vec![
+            variant("A", VariantKind::Unit),
+            variant(
+                "B",
+                VariantKind::Struct(vec![field("x", Ty::Prim(Prim::Int { bits: 32, signed: true }))]),
+            ),
+            variant("C", VariantKind::Newtype(Ty::Prim(Prim::Str))),
+        ]
+    }
+
+    #[test]
+    fn externally_tagged_enum() {
+        let d = enum_decl(EnumRepr::External, sample_variants());
+        assert_eq!(
+            emit_decl(&d, &Config::new()),
+            "export type X =\n  | \"A\"\n  | { B: { x: number } }\n  | { C: string };\n"
+        );
+    }
+
+    #[test]
+    fn all_unit_enum_is_a_string_union() {
+        let d = enum_decl(
+            EnumRepr::UnitOnly,
+            vec![variant("Active", VariantKind::Unit), variant("Banned", VariantKind::Unit)],
+        );
+        assert_eq!(emit_decl(&d, &Config::new()), "export type X = \"Active\" | \"Banned\";\n");
+    }
+
+    #[test]
+    fn internally_tagged_enum_inlines_struct_fields() {
+        let d = enum_decl(
+            EnumRepr::Internal { tag: "t".into() },
+            vec![
+                variant("A", VariantKind::Unit),
+                variant("B", VariantKind::Struct(vec![field("x", Ty::Prim(Prim::Bool))])),
+            ],
+        );
+        assert_eq!(
+            emit_decl(&d, &Config::new()),
+            "export type X =\n  | { t: \"A\" }\n  | { t: \"B\"; x: boolean };\n"
+        );
+    }
+
+    #[test]
+    fn adjacently_tagged_enum_nests_the_payload() {
+        let d =
+            enum_decl(EnumRepr::Adjacent { tag: "t".into(), content: "c".into() }, sample_variants());
+        assert_eq!(
+            emit_decl(&d, &Config::new()),
+            "export type X =\n  | { t: \"A\" }\n  | { t: \"B\"; c: { x: number } }\n  | { t: \"C\"; c: string };\n"
+        );
+    }
+
+    #[test]
+    fn untagged_enum_has_no_discriminant() {
+        let d = enum_decl(EnumRepr::Untagged, sample_variants());
+        assert_eq!(
+            emit_decl(&d, &Config::new()),
+            "export type X =\n  | null\n  | { x: number }\n  | string;\n"
+        );
+    }
+
+    #[test]
+    fn tuple_variant_payload_is_an_array() {
+        let d = enum_decl(
+            EnumRepr::External,
+            vec![variant("T", VariantKind::Tuple(vec![Ty::Prim(Prim::Bool), Ty::Prim(Prim::Str)]))],
+        );
+        assert_eq!(emit_decl(&d, &Config::new()), "export type X = { T: [boolean, string] };\n");
     }
 }
