@@ -4,3 +4,5 @@
 pub mod ir;
 pub mod lower;
 pub mod attrs;
+pub mod diag;
+pub mod parse;
