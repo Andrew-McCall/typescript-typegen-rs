@@ -127,6 +127,15 @@ impl Config {
         self
     }
 
+    /// Apply a set of built-in type mappings for a common foreign crate.
+    /// A later `map_type` call overrides anything a preset installed.
+    pub fn preset(mut self, p: crate::presets::Preset) -> Self {
+        for (rust, ts) in p.expand() {
+            self.type_map.insert(rust, ts);
+        }
+        self
+    }
+
     pub fn check(mut self, on: bool) -> Self {
         self.check = on;
         self
