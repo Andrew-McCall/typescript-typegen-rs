@@ -3,7 +3,7 @@
 //! This module knows nothing about Rust. All policy that depends on `Config` —
 //! integer width, optionality style, interface vs alias — lives here.
 
-use crate::config::{BigInt, Config, OptionalStyle, StructStyle};
+use crate::config::{BigInt, Bytes, Config, OptionalStyle, StructStyle};
 use crate::ir::{Body, Decl, EnumRepr, Field, Prim, Ty, Variant, VariantKind};
 
 const INDENT: &str = "  ";
@@ -11,6 +11,14 @@ const INDENT: &str = "  ";
 pub fn emit_ty(ty: &Ty, cfg: &Config) -> String {
     match ty {
         Ty::Prim(p) => emit_prim(p, cfg),
+        // A byte array only reaches TypeScript as text if the codec encodes it
+        // that way; serde_json itself writes a number array, which is the default.
+        Ty::Array(inner)
+            if cfg.bytes_style() == Bytes::Str
+                && **inner == Ty::Prim(Prim::Int { bits: 8, signed: false }) =>
+        {
+            "string".to_string()
+        }
         Ty::Array(inner) => {
             let rendered = emit_ty(inner, cfg);
             if needs_parens(inner) {
@@ -201,6 +209,9 @@ fn quoted(s: &str) -> String {
 
 fn emit_variant(v: &Variant, repr: &EnumRepr, cfg: &Config) -> String {
     let tag = quoted(&v.ts_name);
+    // `#[serde(untagged)]` on a single variant wins over the enum's own
+    // representation: serde writes the bare payload with no discriminant.
+    let repr = if v.untagged { &EnumRepr::Untagged } else { repr };
     match repr {
         EnumRepr::UnitOnly => tag,
         EnumRepr::External => match &v.kind {
@@ -493,7 +504,7 @@ mod enum_tests {
     }
 
     fn variant(name: &str, kind: VariantKind) -> Variant {
-        Variant { rust_name: name.into(), ts_name: name.into(), docs: vec![], kind }
+        Variant { rust_name: name.into(), ts_name: name.into(), docs: vec![], kind, untagged: false }
     }
 
     fn enum_decl(repr: EnumRepr, variants: Vec<Variant>) -> Decl {

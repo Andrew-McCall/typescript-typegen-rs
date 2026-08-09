@@ -73,6 +73,9 @@ pub struct Variant {
     pub ts_name: String,
     pub docs: Vec<String>,
     pub kind: VariantKind,
+    /// `#[serde(untagged)]` on this variant alone: it serialises as its bare
+    /// payload even inside an otherwise tagged enum.
+    pub untagged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

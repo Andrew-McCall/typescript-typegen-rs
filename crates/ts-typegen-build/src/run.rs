@@ -53,6 +53,16 @@ pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
     let ctx = LowerCtx { params: Default::default(), map: cfg.type_map().clone() };
     let mut diags = Diagnostics::default();
     let reg = scan_roots(cfg.scans(), &ctx, &mut diags);
+    if reg.decls().is_empty() {
+        diags.push(
+            crate::diag::Diagnostic::warning(
+                crate::ir::SourceLoc { file: cfg.scans().first().cloned().unwrap_or_default(), line: 0 },
+                "no #[derive(Ts)] types found in the scanned roots",
+            )
+            .with_help("check the .scan(..) paths, or remove the build script if unused"),
+        );
+    }
+
     let files = render_all(&reg, cfg, &mut diags);
 
     let render = |d: &crate::diag::Diagnostic| {

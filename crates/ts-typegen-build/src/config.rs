@@ -14,6 +14,17 @@ pub enum BigInt {
     Str,
 }
 
+/// How `Vec<u8>` and `[u8; N]` render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Bytes {
+    /// What plain `serde_json` emits: a JSON array of numbers.
+    #[default]
+    NumberArray,
+    /// For codecs that encode byte arrays as text, e.g. `serde_bytes` with a
+    /// base64 helper. Changes only the binding, never what serde writes.
+    Str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptionalStyle {
     /// `field: T | null` — serde serializes `None` as `null` with the key present.
@@ -42,6 +53,7 @@ pub struct Config {
     index: bool,
     index_name: String,
     bigint: BigInt,
+    bytes: Bytes,
     optional_style: OptionalStyle,
     struct_style: StructStyle,
     import_extension: String,
@@ -59,6 +71,7 @@ impl Default for Config {
             index: true,
             index_name: "index.ts".to_string(),
             bigint: BigInt::default(),
+            bytes: Bytes::default(),
             optional_style: OptionalStyle::default(),
             struct_style: StructStyle::default(),
             import_extension: String::new(),
@@ -102,6 +115,13 @@ impl Config {
 
     pub fn bigint(mut self, b: BigInt) -> Self {
         self.bigint = b;
+        self
+    }
+
+    /// How byte arrays render. The default matches serde_json; `Str` is for
+    /// projects whose codec text-encodes them.
+    pub fn bytes(mut self, b: Bytes) -> Self {
+        self.bytes = b;
         self
     }
 
@@ -195,6 +215,9 @@ impl Config {
     }
     pub fn bigint_style(&self) -> BigInt {
         self.bigint
+    }
+    pub fn bytes_style(&self) -> Bytes {
+        self.bytes
     }
     pub fn optional(&self) -> OptionalStyle {
         self.optional_style

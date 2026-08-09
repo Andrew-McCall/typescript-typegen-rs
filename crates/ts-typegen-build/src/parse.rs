@@ -389,6 +389,7 @@ fn enum_body(
                 ts_name,
                 docs: doc_lines(&v.attrs),
                 kind,
+                untagged: va.untagged,
             })
         })
         .collect();
@@ -411,6 +412,11 @@ fn enum_body(
 
     if let EnumRepr::Internal { .. } = &repr {
         for (v, syn_v) in variants.iter().zip(e.variants.iter()) {
+            // A variant carrying its own #[serde(untagged)] opts out of the
+            // container's tagging, so the map-shape requirement does not apply.
+            if v.untagged {
+                continue;
+            }
             let bad = match &v.kind {
                 VariantKind::Tuple(_) => true,
                 VariantKind::Newtype(t) => {
