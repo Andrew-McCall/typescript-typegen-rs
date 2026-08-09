@@ -14,6 +14,16 @@ pub enum BigInt {
     Str,
 }
 
+/// How opaque values such as `serde_json::Value` render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnknownStyle {
+    /// Forces callers to narrow before use.
+    #[default]
+    Unknown,
+    /// Opts out of checking entirely; useful when migrating an existing codebase.
+    Any,
+}
+
 /// How `Vec<u8>` and `[u8; N]` render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Bytes {
@@ -52,8 +62,11 @@ pub struct Config {
     output: PathBuf,
     index: bool,
     index_name: String,
-    bigint: BigInt,
+    int64: BigInt,
+    int128: BigInt,
     bytes: Bytes,
+    unknown: UnknownStyle,
+    header: String,
     optional_style: OptionalStyle,
     struct_style: StructStyle,
     import_extension: String,
@@ -70,8 +83,11 @@ impl Default for Config {
             output: PathBuf::from("bindings"),
             index: true,
             index_name: "index.ts".to_string(),
-            bigint: BigInt::default(),
+            int64: BigInt::default(),
+            int128: BigInt::default(),
             bytes: Bytes::default(),
+            unknown: UnknownStyle::default(),
+            header: String::new(),
             optional_style: OptionalStyle::default(),
             struct_style: StructStyle::default(),
             import_extension: String::new(),
@@ -113,8 +129,39 @@ impl Config {
         self
     }
 
+    /// Sets the style for every integer wider than 32 bits. Shorthand for
+    /// calling [`Config::int64`] and [`Config::int128`] with the same value.
     pub fn bigint(mut self, b: BigInt) -> Self {
-        self.bigint = b;
+        self.int64 = b;
+        self.int128 = b;
+        self
+    }
+
+    /// Style for `i64`, `u64`, `isize` and `usize`.
+    ///
+    /// These exceed JavaScript's safe integer range only above 2^53, so many
+    /// projects leave them as `number` and set only [`Config::int128`].
+    pub fn int64(mut self, b: BigInt) -> Self {
+        self.int64 = b;
+        self
+    }
+
+    /// Style for `i128` and `u128`, which no JavaScript number can represent.
+    pub fn int128(mut self, b: BigInt) -> Self {
+        self.int128 = b;
+        self
+    }
+
+    /// How `serde_json::Value` and other opaque types render.
+    pub fn unknown_type(mut self, u: UnknownStyle) -> Self {
+        self.unknown = u;
+        self
+    }
+
+    /// Lines inserted after the generated-file marker in every emitted file,
+    /// e.g. `/* eslint-disable */`. No trailing newline needed.
+    pub fn header(mut self, header: impl Into<String>) -> Self {
+        self.header = header.into();
         self
     }
 
@@ -213,8 +260,17 @@ impl Config {
     pub fn index_file_name(&self) -> &str {
         &self.index_name
     }
-    pub fn bigint_style(&self) -> BigInt {
-        self.bigint
+    pub fn int64_style(&self) -> BigInt {
+        self.int64
+    }
+    pub fn int128_style(&self) -> BigInt {
+        self.int128
+    }
+    pub fn unknown_style(&self) -> UnknownStyle {
+        self.unknown
+    }
+    pub fn header_lines(&self) -> &str {
+        &self.header
     }
     pub fn bytes_style(&self) -> Bytes {
         self.bytes
@@ -251,7 +307,8 @@ mod tests {
         assert_eq!(c.output_path(), Path::new("bindings"));
         assert!(c.index_enabled());
         assert_eq!(c.index_file_name(), "index.ts");
-        assert_eq!(c.bigint_style(), BigInt::Number);
+        assert_eq!(c.int64_style(), BigInt::Number);
+        assert_eq!(c.int128_style(), BigInt::Number);
         assert_eq!(c.optional(), OptionalStyle::Nullable);
         assert_eq!(c.structs(), StructStyle::Interface);
         assert_eq!(c.extension(), "");

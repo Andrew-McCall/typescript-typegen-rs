@@ -46,8 +46,7 @@ pub fn render_all(
             ));
         }
 
-        let mut out = String::from(MARKER);
-        out.push('\n');
+        let mut out = banner(cfg);
         if !imports.is_empty() {
             out.push_str(&imports.join("\n"));
             out.push_str("\n\n");
@@ -57,8 +56,7 @@ pub fn render_all(
     }
 
     if cfg.index_enabled() {
-        let mut out = String::from(MARKER);
-        out.push('\n');
+        let mut out = banner(cfg);
         // Sorted, not scan order: module traversal order is not stable across
         // platforms, and an unstable barrel would fail check mode spuriously.
         let mut names: Vec<&str> = reg.decls().iter().map(|d| d.ts_name.as_str()).collect();
@@ -73,6 +71,19 @@ pub fn render_all(
     }
 
     files
+}
+
+/// The marker line every generated file opens with, plus any configured
+/// header. The marker must stay first: the orphan sweep keys off it.
+fn banner(cfg: &Config) -> String {
+    let mut out = String::from(MARKER);
+    out.push('\n');
+    let header = cfg.header_lines();
+    if !header.is_empty() {
+        out.push_str(header.trim_end_matches('\n'));
+        out.push('\n');
+    }
+    out
 }
 
 /// Replaces `#[ts(inline)]` fields' references with the target's shape, so the

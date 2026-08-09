@@ -70,13 +70,31 @@ never silent `unknown`.
 | `.scan(path)` | `"src"` | Directory to scan. The first call replaces the default; later calls append. |
 | `.output(path)` | `"bindings"` | Where `.ts` files are written. |
 | `.index(bool)` / `.index_name(s)` | `true` / `"index.ts"` | Barrel file. |
-| `.bigint(BigInt)` | `Number` | How `u64`/`i64` and wider render: `Number`, `Bigint`, or `Str`. |
+| `.int64(BigInt)` | `Number` | How `i64`, `u64`, `isize`, `usize` render: `Number`, `Bigint`, or `Str`. |
+| `.int128(BigInt)` | `Number` | Same, for `i128` and `u128`. |
+| `.bigint(BigInt)` | `Number` | Shorthand setting both of the above. |
+| `.bytes(Bytes)` | `NumberArray` | How `Vec<u8>` / `[u8; N]` render. |
+| `.unknown_type(UnknownStyle)` | `Unknown` | `unknown` or `any` for opaque values like `serde_json::Value`. |
+| `.header(s)` | — | Lines inserted after the marker in every file, e.g. `/* eslint-disable */`. |
 | `.optional_style(OptionalStyle)` | `Nullable` | `T \| null`, `?: T`, or both. |
 | `.map_type(rust, ts)` | — | Override a type by path, matched on the final segment. |
 | `.preset(Preset)` | — | Built-in mappings for `uuid`, `chrono`, `time`, `url`, decimals, `bytes`. |
 | `.struct_style(StructStyle)` | `Interface` | `interface` vs `type` for named-field structs. |
 | `.import_extension(ext)` | `""` | Append e.g. `".js"` for ESM under `moduleResolution: node16`. |
 | `.always_run(bool)` | `false` | Generate even when built as a dependency. |
+
+Integer widths are configured separately because the risk differs sharply.
+`i64` loses precision only above 2^53, which many payloads never reach; `i128`
+and `u128` cannot be represented by a JavaScript number at all, and `serde_json`
+writes them at full precision -- `340282366920938463463374607431768211455` -- so
+`JSON.parse` mangles them every time. A common setting is:
+
+```rust
+.int64(BigInt::Number).int128(BigInt::Bigint)
+```
+
+The defaults stay `Number` throughout, because that is what serde_json actually
+puts on the wire; see the note on `bigint` below.
 
 ## Attributes
 

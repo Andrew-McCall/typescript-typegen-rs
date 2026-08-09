@@ -3,7 +3,7 @@
 //! This module knows nothing about Rust. All policy that depends on `Config` —
 //! integer width, optionality style, interface vs alias — lives here.
 
-use crate::config::{BigInt, Bytes, Config, OptionalStyle, StructStyle};
+use crate::config::{BigInt, Bytes, Config, OptionalStyle, StructStyle, UnknownStyle};
 use crate::ir::{Body, Decl, EnumRepr, Field, Prim, Ty, Variant, VariantKind};
 
 const INDENT: &str = "  ";
@@ -46,7 +46,18 @@ pub fn emit_ty(ty: &Ty, cfg: &Config) -> String {
         }
         Ty::Param(name) => name.clone(),
         Ty::Raw(raw) => raw.clone(),
-        Ty::Unknown => "unknown".to_string(),
+        Ty::Unknown => match cfg.unknown_style() {
+            UnknownStyle::Unknown => "unknown".to_string(),
+            UnknownStyle::Any => "any".to_string(),
+        },
+    }
+}
+
+fn int_style(b: BigInt) -> String {
+    match b {
+        BigInt::Number => "number".into(),
+        BigInt::Bigint => "bigint".into(),
+        BigInt::Str => "string".into(),
     }
 }
 
@@ -65,11 +76,8 @@ fn emit_prim(p: &Prim, cfg: &Config) -> String {
         Prim::Bool => "boolean".into(),
         Prim::Float => "number".into(),
         Prim::Null => "null".into(),
-        Prim::Int { bits, .. } if *bits >= 64 => match cfg.bigint_style() {
-            BigInt::Number => "number".into(),
-            BigInt::Bigint => "bigint".into(),
-            BigInt::Str => "string".into(),
-        },
+        Prim::Int { bits, .. } if *bits >= 128 => int_style(cfg.int128_style()),
+        Prim::Int { bits, .. } if *bits >= 64 => int_style(cfg.int64_style()),
         Prim::Int { .. } => "number".into(),
     }
 }
