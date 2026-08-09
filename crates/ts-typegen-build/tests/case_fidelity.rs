@@ -23,8 +23,10 @@ macro_rules! field_probe {
             id: u8,
             oauth2_token: u8,
             multiple__underscores: u8,
-            type_: u8,
+            ref_: u8,
             a1b: u8,
+            r#type: u8,
+            r#match: u8,
         }
     };
 }
@@ -36,8 +38,12 @@ const FIELDS: &[&str] = &[
     "id",
     "oauth2_token",
     "multiple__underscores",
-    "type_",
+    "ref_",
     "a1b",
+    // Raw identifiers arrive unrawed: parse::unraw strips `r#` before any
+    // rename rule runs, exactly as serde does.
+    "type",
+    "match",
 ];
 
 field_probe!(FCamel, "camelCase");
@@ -252,7 +258,8 @@ macro_rules! impl_default_probe {
             fn default_probe() -> Self {
                 $name {
                     user_id: 0, xml_http_request: 0, field_2: 0, id: 0,
-                    oauth2_token: 0, multiple__underscores: 0, type_: 0, a1b: 0,
+                    oauth2_token: 0, multiple__underscores: 0, ref_: 0, a1b: 0,
+                    r#type: 0, r#match: 0,
                 }
             }
         })*

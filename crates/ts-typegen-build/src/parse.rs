@@ -22,6 +22,16 @@ pub fn has_ts_derive(attrs: &[syn::Attribute]) -> bool {
     found
 }
 
+/// Strips the `r#` from a raw identifier.
+///
+/// serde unraws before applying rename rules, so a field written `r#type`
+/// serialises as `type`. syn hands us the prefix intact, so dropping it here
+/// keeps every downstream name (and the rename rules) matching serde.
+fn unraw(ident: &syn::Ident) -> String {
+    let s = ident.to_string();
+    s.strip_prefix("r#").map(str::to_owned).unwrap_or(s)
+}
+
 fn loc_of(file: &Path, span: proc_macro2::Span) -> SourceLoc {
     SourceLoc {
         file: file.to_path_buf(),
@@ -75,7 +85,7 @@ pub fn parse_item(
     let ts_name = attrs
         .rename
         .clone()
-        .unwrap_or_else(|| item.ident.to_string());
+        .unwrap_or_else(|| unraw(&item.ident));
     check_custom_serialisation(item, file, diags);
 
     let body = match &item.data {
@@ -181,7 +191,7 @@ fn named_fields(
             if fa.skip {
                 return None;
             }
-            let rust_name = f.ident.as_ref()?.to_string();
+            let rust_name = unraw(f.ident.as_ref()?);
             let ts_name = fa.rename.clone().unwrap_or_else(|| match rule {
                 Some(r) => r.apply_to_field(&rust_name),
                 None => rust_name.clone(),
@@ -255,7 +265,7 @@ fn enum_body(
             if va.skip {
                 return None;
             }
-            let rust_name = v.ident.to_string();
+            let rust_name = unraw(&v.ident);
             let ts_name = va.rename.clone().unwrap_or_else(|| match attrs.rename_all {
                 Some(r) => r.apply_to_variant(&rust_name),
                 None => rust_name.clone(),
@@ -561,6 +571,31 @@ mod attribute_behaviour_tests {
         let VariantKind::Struct(b) = &variants[1].kind else { panic!() };
         assert_eq!(a[0].ts_name, "longName", "variant-level rename_all not applied");
         assert_eq!(b[0].ts_name, "long_name", "must not leak to sibling variants");
+    }
+
+    #[test]
+    fn raw_identifiers_lose_their_prefix_like_serde_does() {
+        // serde serialises `r#type` as `type`; syn hands us the `r#` intact.
+        let d = ok("#[derive(Ts)] struct S { r#type: u8, r#match: u8 }");
+        let Body::Struct(f) = d.body else { panic!() };
+        assert_eq!(f[0].ts_name, "type");
+        assert_eq!(f[1].ts_name, "match");
+        assert_eq!(f[0].rust_name, "type");
+    }
+
+    #[test]
+    fn raw_identifiers_are_unrawed_before_rename_rules_apply() {
+        let d = ok("#[derive(Ts)] #[serde(rename_all = \"camelCase\")] \
+                    struct S { r#type: u8 }");
+        let Body::Struct(f) = d.body else { panic!() };
+        assert_eq!(f[0].ts_name, "type", "must not become r#Type or similar");
+    }
+
+    #[test]
+    fn raw_variants_and_type_names_are_unrawed_too() {
+        let d = ok("#[derive(Ts)] enum E { r#match, Other }");
+        let Body::Enum { variants, .. } = d.body else { panic!() };
+        assert_eq!(variants[0].ts_name, "match");
     }
 
     #[test]
