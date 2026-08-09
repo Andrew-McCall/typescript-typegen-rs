@@ -12,7 +12,11 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn new(loc: SourceLoc, message: impl Into<String>) -> Self {
-        Diagnostic { loc, message: message.into(), help: None }
+        Diagnostic {
+            loc,
+            message: message.into(),
+            help: None,
+        }
     }
 
     pub fn with_help(mut self, help: impl Into<String>) -> Self {

@@ -31,8 +31,17 @@ pub struct LowerCtx {
 }
 
 /// Wrappers that vanish on the wire.
-const TRANSPARENT: &[&str] = &["Box", "Rc", "Arc", "Cow", "RefCell", "Cell", "Mutex", "RwLock"];
-const ARRAYS: &[&str] = &["Vec", "VecDeque", "HashSet", "BTreeSet", "LinkedList", "BinaryHeap"];
+const TRANSPARENT: &[&str] = &[
+    "Box", "Rc", "Arc", "Cow", "RefCell", "Cell", "Mutex", "RwLock",
+];
+const ARRAYS: &[&str] = &[
+    "Vec",
+    "VecDeque",
+    "HashSet",
+    "BTreeSet",
+    "LinkedList",
+    "BinaryHeap",
+];
 const MAPS: &[&str] = &["HashMap", "BTreeMap", "IndexMap"];
 
 pub fn lower_type(ty: &syn::Type, ctx: &LowerCtx) -> Ty {
@@ -133,18 +142,54 @@ fn builtin_prim(name: &str) -> Option<Prim> {
         "String" | "str" | "char" | "PathBuf" | "Path" | "OsString" | "OsStr" => Prim::Str,
         "bool" => Prim::Bool,
         "f32" | "f64" => Prim::Float,
-        "i8" => Prim::Int { bits: 8, signed: true },
-        "i16" => Prim::Int { bits: 16, signed: true },
-        "i32" => Prim::Int { bits: 32, signed: true },
-        "i64" => Prim::Int { bits: 64, signed: true },
-        "i128" => Prim::Int { bits: 128, signed: true },
-        "isize" => Prim::Int { bits: 64, signed: true },
-        "u8" => Prim::Int { bits: 8, signed: false },
-        "u16" => Prim::Int { bits: 16, signed: false },
-        "u32" => Prim::Int { bits: 32, signed: false },
-        "u64" => Prim::Int { bits: 64, signed: false },
-        "u128" => Prim::Int { bits: 128, signed: false },
-        "usize" => Prim::Int { bits: 64, signed: false },
+        "i8" => Prim::Int {
+            bits: 8,
+            signed: true,
+        },
+        "i16" => Prim::Int {
+            bits: 16,
+            signed: true,
+        },
+        "i32" => Prim::Int {
+            bits: 32,
+            signed: true,
+        },
+        "i64" => Prim::Int {
+            bits: 64,
+            signed: true,
+        },
+        "i128" => Prim::Int {
+            bits: 128,
+            signed: true,
+        },
+        "isize" => Prim::Int {
+            bits: 64,
+            signed: true,
+        },
+        "u8" => Prim::Int {
+            bits: 8,
+            signed: false,
+        },
+        "u16" => Prim::Int {
+            bits: 16,
+            signed: false,
+        },
+        "u32" => Prim::Int {
+            bits: 32,
+            signed: false,
+        },
+        "u64" => Prim::Int {
+            bits: 64,
+            signed: false,
+        },
+        "u128" => Prim::Int {
+            bits: 128,
+            signed: false,
+        },
+        "usize" => Prim::Int {
+            bits: 64,
+            signed: false,
+        },
         n if n.starts_with("NonZero") => return nonzero_prim(n),
         _ => return None,
     })
@@ -181,9 +226,27 @@ mod tests {
         assert_eq!(lower("std::path::PathBuf"), Ty::Prim(Prim::Str));
         assert_eq!(lower("bool"), Ty::Prim(Prim::Bool));
         assert_eq!(lower("f64"), Ty::Prim(Prim::Float));
-        assert_eq!(lower("i32"), Ty::Prim(Prim::Int { bits: 32, signed: true }));
-        assert_eq!(lower("u64"), Ty::Prim(Prim::Int { bits: 64, signed: false }));
-        assert_eq!(lower("usize"), Ty::Prim(Prim::Int { bits: 64, signed: false }));
+        assert_eq!(
+            lower("i32"),
+            Ty::Prim(Prim::Int {
+                bits: 32,
+                signed: true
+            })
+        );
+        assert_eq!(
+            lower("u64"),
+            Ty::Prim(Prim::Int {
+                bits: 64,
+                signed: false
+            })
+        );
+        assert_eq!(
+            lower("usize"),
+            Ty::Prim(Prim::Int {
+                bits: 64,
+                signed: false
+            })
+        );
         assert_eq!(lower("()"), Ty::Prim(Prim::Null));
     }
 
@@ -191,15 +254,27 @@ mod tests {
     fn collections() {
         assert_eq!(
             lower("Vec<u8>"),
-            Ty::Array(Box::new(Ty::Prim(Prim::Int { bits: 8, signed: false })))
+            Ty::Array(Box::new(Ty::Prim(Prim::Int {
+                bits: 8,
+                signed: false
+            })))
         );
-        assert_eq!(lower("HashSet<String>"), Ty::Array(Box::new(Ty::Prim(Prim::Str))));
-        assert_eq!(lower("[bool; 4]"), Ty::Array(Box::new(Ty::Prim(Prim::Bool))));
+        assert_eq!(
+            lower("HashSet<String>"),
+            Ty::Array(Box::new(Ty::Prim(Prim::Str)))
+        );
+        assert_eq!(
+            lower("[bool; 4]"),
+            Ty::Array(Box::new(Ty::Prim(Prim::Bool)))
+        );
         assert_eq!(
             lower("HashMap<String, i32>"),
             Ty::Record {
                 key: Box::new(Ty::Prim(Prim::Str)),
-                value: Box::new(Ty::Prim(Prim::Int { bits: 32, signed: true })),
+                value: Box::new(Ty::Prim(Prim::Int {
+                    bits: 32,
+                    signed: true
+                })),
             }
         );
         assert_eq!(
@@ -232,16 +307,27 @@ mod tests {
             panic!("expected union");
         };
         assert_eq!(arms.len(), 2);
-        let Ty::Object(ok) = &arms[0] else { panic!("expected object") };
+        let Ty::Object(ok) = &arms[0] else {
+            panic!("expected object")
+        };
         assert_eq!(ok[0].ts_name, "Ok");
     }
 
     #[test]
     fn unknown_named_type_becomes_a_ref() {
-        assert_eq!(lower("Address"), Ty::Ref { name: "Address".into(), args: vec![] });
+        assert_eq!(
+            lower("Address"),
+            Ty::Ref {
+                name: "Address".into(),
+                args: vec![]
+            }
+        );
         assert_eq!(
             lower("crate::types::Address"),
-            Ty::Ref { name: "Address".into(), args: vec![] }
+            Ty::Ref {
+                name: "Address".into(),
+                args: vec![]
+            }
         );
     }
 
@@ -253,14 +339,23 @@ mod tests {
             Ty::Array(Box::new(Ty::Param("T".into())))
         );
         // Not a declared param, so it stays a reference.
-        assert_eq!(lower_generic("T", &["U"]), Ty::Ref { name: "T".into(), args: vec![] });
+        assert_eq!(
+            lower_generic("T", &["U"]),
+            Ty::Ref {
+                name: "T".into(),
+                args: vec![]
+            }
+        );
     }
 
     #[test]
     fn type_map_overrides_by_final_segment() {
         let mut map = TypeMap::default();
         map.insert("uuid::Uuid", "string");
-        let ctx = LowerCtx { map, ..LowerCtx::default() };
+        let ctx = LowerCtx {
+            map,
+            ..LowerCtx::default()
+        };
         let ty: syn::Type = syn::parse_str("uuid::Uuid").unwrap();
         assert_eq!(lower_type(&ty, &ctx), Ty::Raw("string".into()));
         let bare: syn::Type = syn::parse_str("Uuid").unwrap();
@@ -271,7 +366,10 @@ mod tests {
     fn generic_refs_carry_their_arguments() {
         assert_eq!(
             lower("Page<String>"),
-            Ty::Ref { name: "Page".into(), args: vec![Ty::Prim(Prim::Str)] }
+            Ty::Ref {
+                name: "Page".into(),
+                args: vec![Ty::Prim(Prim::Str)]
+            }
         );
     }
 }

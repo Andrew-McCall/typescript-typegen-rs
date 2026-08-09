@@ -27,11 +27,17 @@ pub enum Ty {
     Prim(Prim),
     Array(Box<Ty>),
     Tuple(Vec<Ty>),
-    Record { key: Box<Ty>, value: Box<Ty> },
+    Record {
+        key: Box<Ty>,
+        value: Box<Ty>,
+    },
     Union(Vec<Ty>),
     Object(Vec<Field>),
     /// A reference to another generated type; becomes an import line.
-    Ref { name: String, args: Vec<Ty> },
+    Ref {
+        name: String,
+        args: Vec<Ty>,
+    },
     /// A generic type parameter of the enclosing declaration.
     Param(String),
     /// Verbatim TypeScript from `#[ts(type = "...")]` or a config type mapping.
@@ -68,8 +74,13 @@ pub struct Variant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnumRepr {
     External,
-    Internal { tag: String },
-    Adjacent { tag: String, content: String },
+    Internal {
+        tag: String,
+    },
+    Adjacent {
+        tag: String,
+        content: String,
+    },
     Untagged,
     /// Selected only when the enum would be `External` *and* every variant is a
     /// unit variant. An all-unit enum carrying `#[serde(tag = "t")]` stays
@@ -83,7 +94,10 @@ pub enum Body {
     Newtype(Ty),
     Tuple(Vec<Ty>),
     Unit,
-    Enum { repr: EnumRepr, variants: Vec<Variant> },
+    Enum {
+        repr: EnumRepr,
+        variants: Vec<Variant>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +133,8 @@ impl Registry {
                 incoming: decl.loc,
             });
         }
-        self.by_ts_name.insert(decl.ts_name.clone(), self.decls.len());
+        self.by_ts_name
+            .insert(decl.ts_name.clone(), self.decls.len());
         self.decls.push(decl);
         Ok(())
     }
@@ -144,7 +159,10 @@ mod tests {
             docs: vec![],
             generics: vec![],
             body: Body::Unit,
-            loc: SourceLoc { file: "x.rs".into(), line: 1 },
+            loc: SourceLoc {
+                file: "x.rs".into(),
+                line: 1,
+            },
         }
     }
 
@@ -162,7 +180,10 @@ mod tests {
         reg.insert(decl("User")).unwrap();
         let mut second = decl("User");
         second.rust_path = "crate::other::User".into();
-        second.loc = SourceLoc { file: "y.rs".into(), line: 9 };
+        second.loc = SourceLoc {
+            file: "y.rs".into(),
+            line: 9,
+        };
         let clash = reg.insert(second).expect_err("second insert must clash");
         assert_eq!(clash.existing.file.to_str().unwrap(), "x.rs");
         assert_eq!(clash.incoming.line, 9);
@@ -170,8 +191,23 @@ mod tests {
 
     #[test]
     fn int_width_is_preserved_not_collapsed_to_number() {
-        let ty = Ty::Prim(Prim::Int { bits: 64, signed: false });
-        assert_eq!(ty, Ty::Prim(Prim::Int { bits: 64, signed: false }));
-        assert_ne!(ty, Ty::Prim(Prim::Int { bits: 32, signed: false }));
+        let ty = Ty::Prim(Prim::Int {
+            bits: 64,
+            signed: false,
+        });
+        assert_eq!(
+            ty,
+            Ty::Prim(Prim::Int {
+                bits: 64,
+                signed: false
+            })
+        );
+        assert_ne!(
+            ty,
+            Ty::Prim(Prim::Int {
+                bits: 32,
+                signed: false
+            })
+        );
     }
 }

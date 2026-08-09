@@ -66,7 +66,10 @@ fn walk_file(
         Ok(a) => a,
         Err(e) => {
             diags.push(Diagnostic::new(
-                SourceLoc { file: file.to_path_buf(), line: e.span().start().line },
+                SourceLoc {
+                    file: file.to_path_buf(),
+                    line: e.span().start().line,
+                },
                 format!("failed to parse: {e}"),
             ));
             return;
@@ -87,7 +90,9 @@ fn walk_items(
     for item in items {
         match item {
             syn::Item::Struct(_) | syn::Item::Enum(_) => {
-                let Some(input) = to_derive_input(item) else { continue };
+                let Some(input) = to_derive_input(item) else {
+                    continue;
+                };
                 if !has_ts_derive(&input.attrs) {
                     continue;
                 }
@@ -143,7 +148,10 @@ fn resolve_mod_file(current: &Path, name: &str) -> Option<PathBuf> {
         vec![dir.join(stem), dir.to_path_buf()]
     };
     for base in bases {
-        for candidate in [base.join(format!("{name}.rs")), base.join(name).join("mod.rs")] {
+        for candidate in [
+            base.join(format!("{name}.rs")),
+            base.join(name).join("mod.rs"),
+        ] {
             if candidate.is_file() {
                 return Some(candidate);
             }

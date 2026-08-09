@@ -43,12 +43,18 @@ fn follows_mod_declarations_and_records_module_paths() {
         ("lib.rs", "mod user;\nmod nested;\n"),
         ("user.rs", "#[derive(Ts)] pub struct User { x: u8 }\n"),
         ("nested/mod.rs", "pub mod deep;\n"),
-        ("nested/deep.rs", "#[derive(Ts)] pub struct Deep { x: u8 }\n"),
+        (
+            "nested/deep.rs",
+            "#[derive(Ts)] pub struct Deep { x: u8 }\n",
+        ),
     ]);
     let (reg, diags) = scan(&dir);
     assert!(diags.is_empty());
     assert_eq!(reg.lookup("User").unwrap().rust_path, "crate::user::User");
-    assert_eq!(reg.lookup("Deep").unwrap().rust_path, "crate::nested::deep::Deep");
+    assert_eq!(
+        reg.lookup("Deep").unwrap().rust_path,
+        "crate::nested::deep::Deep"
+    );
 }
 
 #[test]
@@ -58,7 +64,10 @@ fn walks_inline_modules() {
         "pub mod inner { #[derive(Ts)] pub struct Inner { x: u8 } }\n",
     )]);
     let (reg, _) = scan(&dir);
-    assert_eq!(reg.lookup("Inner").unwrap().rust_path, "crate::inner::Inner");
+    assert_eq!(
+        reg.lookup("Inner").unwrap().rust_path,
+        "crate::inner::Inner"
+    );
 }
 
 #[test]
@@ -70,7 +79,9 @@ fn duplicate_ts_names_are_reported_not_silently_merged() {
     ]);
     let (_, diags) = scan(&dir);
     assert!(
-        diags.iter().any(|d| d.message.contains("duplicate TypeScript name `Config`")),
+        diags
+            .iter()
+            .any(|d| d.message.contains("duplicate TypeScript name `Config`")),
         "expected a duplicate-name diagnostic"
     );
 }
@@ -83,7 +94,10 @@ fn cfg_gated_modules_are_still_scanned() {
          pub mod gated { #[derive(Ts)] pub struct Gated { x: u8 } }\n",
     )]);
     let (reg, _) = scan(&dir);
-    assert!(reg.lookup("Gated").is_some(), "cfg-gated types must still be emitted");
+    assert!(
+        reg.lookup("Gated").is_some(),
+        "cfg-gated types must still be emitted"
+    );
 }
 
 #[test]

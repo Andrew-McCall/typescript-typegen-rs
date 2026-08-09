@@ -120,9 +120,10 @@ pub fn doc_lines(attrs: &[syn::Attribute]) -> Vec<String> {
         .filter(|a| a.path().is_ident("doc"))
         .filter_map(|a| match &a.meta {
             syn::Meta::NameValue(nv) => match &nv.value {
-                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => {
-                    Some(s.value().trim().to_string())
-                }
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) => Some(s.value().trim().to_string()),
                 _ => None,
             },
             _ => None,
@@ -187,7 +188,10 @@ mod tests {
     fn extracts_doc_comments_trimmed() {
         let item: syn::DeriveInput =
             syn::parse_str("/// Stable identifier.\n/// Second line.\nstruct S;").unwrap();
-        assert_eq!(doc_lines(&item.attrs), vec!["Stable identifier.", "Second line."]);
+        assert_eq!(
+            doc_lines(&item.attrs),
+            vec!["Stable identifier.", "Second line."]
+        );
     }
 
     #[test]

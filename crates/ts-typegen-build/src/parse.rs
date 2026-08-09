@@ -21,7 +21,10 @@ pub fn has_ts_derive(attrs: &[syn::Attribute]) -> bool {
 }
 
 fn loc_of(file: &Path, span: proc_macro2::Span) -> SourceLoc {
-    SourceLoc { file: file.to_path_buf(), line: span.start().line }
+    SourceLoc {
+        file: file.to_path_buf(),
+        line: span.start().line,
+    }
 }
 
 pub fn parse_item(
@@ -67,7 +70,10 @@ pub fn parse_item(
         })
         .collect();
 
-    let ts_name = attrs.rename.clone().unwrap_or_else(|| item.ident.to_string());
+    let ts_name = attrs
+        .rename
+        .clone()
+        .unwrap_or_else(|| item.ident.to_string());
     let body = match &item.data {
         syn::Data::Struct(s) => struct_body(s, &attrs, &ctx),
         syn::Data::Enum(e) => enum_body(e, &attrs, &ctx, file, diags),
@@ -183,7 +189,12 @@ fn enum_body(
                     }
                 }
             };
-            Some(Variant { rust_name, ts_name, docs: doc_lines(&v.attrs), kind })
+            Some(Variant {
+                rust_name,
+                ts_name,
+                docs: doc_lines(&v.attrs),
+                kind,
+            })
         })
         .collect();
 
@@ -191,7 +202,10 @@ fn enum_body(
         EnumRepr::Untagged
     } else {
         match (&attrs.tag, &attrs.content) {
-            (Some(t), Some(c)) => EnumRepr::Adjacent { tag: t.clone(), content: c.clone() },
+            (Some(t), Some(c)) => EnumRepr::Adjacent {
+                tag: t.clone(),
+                content: c.clone(),
+            },
             (Some(t), None) => EnumRepr::Internal { tag: t.clone() },
             _ if variants.iter().all(|v| matches!(v.kind, VariantKind::Unit)) => EnumRepr::UnitOnly,
             _ => EnumRepr::External,
@@ -235,7 +249,13 @@ mod tests {
     fn parse(src: &str) -> (Option<Decl>, Diagnostics) {
         let item: syn::DeriveInput = syn::parse_str(src).expect("parse");
         let mut diags = Diagnostics::default();
-        let decl = parse_item(&item, "crate", Path::new("t.rs"), &LowerCtx::default(), &mut diags);
+        let decl = parse_item(
+            &item,
+            "crate",
+            Path::new("t.rs"),
+            &LowerCtx::default(),
+            &mut diags,
+        );
         (decl, diags)
     }
 
@@ -259,15 +279,26 @@ mod tests {
                     struct User { user_id: u64, #[serde(skip)] secret: String }");
         assert_eq!(d.ts_name, "User");
         assert_eq!(d.rust_path, "crate::User");
-        let Body::Struct(fields) = d.body else { panic!("expected struct") };
+        let Body::Struct(fields) = d.body else {
+            panic!("expected struct")
+        };
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].ts_name, "userId");
-        assert_eq!(fields[0].ty, Ty::Prim(Prim::Int { bits: 64, signed: false }));
+        assert_eq!(
+            fields[0].ty,
+            Ty::Prim(Prim::Int {
+                bits: 64,
+                signed: false
+            })
+        );
     }
 
     #[test]
     fn ts_rename_renames_the_type_itself() {
-        assert_eq!(ok("#[derive(Ts)] #[ts(rename = \"Account\")] struct User;").ts_name, "Account");
+        assert_eq!(
+            ok("#[derive(Ts)] #[ts(rename = \"Account\")] struct User;").ts_name,
+            "Account"
+        );
     }
 
     #[test]
@@ -280,8 +311,14 @@ mod tests {
     #[test]
     fn struct_shapes() {
         assert!(matches!(ok("#[derive(Ts)] struct S;").body, Body::Unit));
-        assert!(matches!(ok("#[derive(Ts)] struct S(String);").body, Body::Newtype(_)));
-        assert!(matches!(ok("#[derive(Ts)] struct S(String, bool);").body, Body::Tuple(_)));
+        assert!(matches!(
+            ok("#[derive(Ts)] struct S(String);").body,
+            Body::Newtype(_)
+        ));
+        assert!(matches!(
+            ok("#[derive(Ts)] struct S(String, bool);").body,
+            Body::Tuple(_)
+        ));
     }
 
     #[test]
@@ -295,23 +332,39 @@ mod tests {
     #[test]
     fn enum_reprs() {
         let ext = ok("#[derive(Ts)] enum E { A, B { x: i32 } }");
-        let Body::Enum { repr, .. } = &ext.body else { panic!() };
+        let Body::Enum { repr, .. } = &ext.body else {
+            panic!()
+        };
         assert_eq!(repr, &EnumRepr::External);
 
         let unit = ok("#[derive(Ts)] enum E { A, B }");
-        let Body::Enum { repr, .. } = &unit.body else { panic!() };
+        let Body::Enum { repr, .. } = &unit.body else {
+            panic!()
+        };
         assert_eq!(repr, &EnumRepr::UnitOnly);
 
         let tagged = ok("#[derive(Ts)] #[serde(tag = \"t\")] enum E { A, B }");
-        let Body::Enum { repr, .. } = &tagged.body else { panic!() };
+        let Body::Enum { repr, .. } = &tagged.body else {
+            panic!()
+        };
         assert_eq!(repr, &EnumRepr::Internal { tag: "t".into() });
 
         let adj = ok("#[derive(Ts)] #[serde(tag = \"t\", content = \"c\")] enum E { A, B(u8) }");
-        let Body::Enum { repr, .. } = &adj.body else { panic!() };
-        assert_eq!(repr, &EnumRepr::Adjacent { tag: "t".into(), content: "c".into() });
+        let Body::Enum { repr, .. } = &adj.body else {
+            panic!()
+        };
+        assert_eq!(
+            repr,
+            &EnumRepr::Adjacent {
+                tag: "t".into(),
+                content: "c".into()
+            }
+        );
 
         let un = ok("#[derive(Ts)] #[serde(untagged)] enum E { A(u8) }");
-        let Body::Enum { repr, .. } = &un.body else { panic!() };
+        let Body::Enum { repr, .. } = &un.body else {
+            panic!()
+        };
         assert_eq!(repr, &EnumRepr::Untagged);
     }
 
@@ -319,7 +372,9 @@ mod tests {
     fn variant_kinds_and_renaming() {
         let d = ok("#[derive(Ts)] #[serde(rename_all = \"snake_case\")] \
                     enum E { UnitOne, New(u8), Tup(u8, bool), Str { x: u8 } }");
-        let Body::Enum { variants, .. } = d.body else { panic!() };
+        let Body::Enum { variants, .. } = d.body else {
+            panic!()
+        };
         assert_eq!(variants[0].ts_name, "unit_one");
         assert!(matches!(variants[0].kind, VariantKind::Unit));
         assert!(matches!(variants[1].kind, VariantKind::Newtype(_)));
@@ -331,7 +386,11 @@ mod tests {
     fn internally_tagged_non_map_newtype_is_an_error() {
         let (_, diags) = parse("#[derive(Ts)] #[serde(tag = \"t\")] enum E { A(u8) }");
         assert!(!diags.is_empty());
-        assert!(diags.iter().any(|d| d.message.contains("internally-tagged")));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("internally-tagged"))
+        );
     }
 
     #[test]
