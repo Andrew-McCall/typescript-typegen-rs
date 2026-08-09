@@ -15,4 +15,3 @@ ts-typegen-macros = { version = "0.1.0", path = "crates/ts-typegen-macros" }
 syn = { version = "2", features = ["full", "extra-traits", "visit"] }
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
-heck = "0.5"

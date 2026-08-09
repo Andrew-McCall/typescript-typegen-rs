@@ -183,7 +183,7 @@ fn named_fields(
             }
             let rust_name = f.ident.as_ref()?.to_string();
             let ts_name = fa.rename.clone().unwrap_or_else(|| match rule {
-                Some(r) => r.apply(&rust_name),
+                Some(r) => r.apply_to_field(&rust_name),
                 None => rust_name.clone(),
             });
             Some(Field {
@@ -257,7 +257,7 @@ fn enum_body(
             }
             let rust_name = v.ident.to_string();
             let ts_name = va.rename.clone().unwrap_or_else(|| match attrs.rename_all {
-                Some(r) => r.apply(&rust_name),
+                Some(r) => r.apply_to_variant(&rust_name),
                 None => rust_name.clone(),
             });
             let kind = match &v.fields {

@@ -3,7 +3,6 @@
 //! Both are parsed into one `Attrs`. Where they overlap, `ts` wins — it is the
 //! escape hatch, so it must be able to contradict serde.
 
-use heck::{ToKebabCase, ToLowerCamelCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameRule {
@@ -32,18 +31,75 @@ impl RenameRule {
         })
     }
 
-    pub fn apply(&self, ident: &str) -> String {
+    /// Renames a struct field or a named variant field.
+    ///
+    /// This is a direct port of serde's own `apply_to_field`, not a generic
+    /// case converter, and the difference is load-bearing: serde assumes the
+    /// input is already `snake_case` and does character substitution, whereas a
+    /// word-segmenting converter silently drops trailing and doubled
+    /// underscores. `type_` must become `type-` under kebab-case, not `type`.
+    pub fn apply_to_field(&self, field: &str) -> String {
         match self {
-            Self::Lower => ident.to_lowercase(),
-            Self::Upper => ident.to_uppercase(),
-            Self::Pascal => ident.to_upper_camel_case(),
-            Self::Camel => ident.to_lower_camel_case(),
-            Self::Snake => ident.to_snake_case(),
-            Self::ScreamingSnake => ident.to_shouty_snake_case(),
-            Self::Kebab => ident.to_kebab_case(),
-            Self::ScreamingKebab => ident.to_kebab_case().to_uppercase(),
+            // serde treats the field as already being in this shape.
+            Self::Lower | Self::Snake => field.to_owned(),
+            Self::Upper | Self::ScreamingSnake => field.to_ascii_uppercase(),
+            Self::Pascal => {
+                let mut out = String::with_capacity(field.len());
+                let mut capitalize = true;
+                for ch in field.chars() {
+                    if ch == '_' {
+                        capitalize = true;
+                    } else if capitalize {
+                        out.extend(ch.to_uppercase());
+                        capitalize = false;
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                out
+            }
+            Self::Camel => lower_first(&Self::Pascal.apply_to_field(field)),
+            Self::Kebab => field.replace('_', "-"),
+            Self::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
         }
     }
+
+    /// Renames an enum variant. Ported from serde's `apply_to_variant`, which
+    /// assumes the input is `PascalCase` — the opposite starting point from
+    /// fields, which is why serde keeps the two conversions separate.
+    pub fn apply_to_variant(&self, variant: &str) -> String {
+        match self {
+            Self::Pascal => variant.to_owned(),
+            Self::Lower => variant.to_ascii_lowercase(),
+            Self::Upper => variant.to_ascii_uppercase(),
+            Self::Camel => lower_first(variant),
+            Self::Snake => pascal_to_snake(variant),
+            Self::ScreamingSnake => pascal_to_snake(variant).to_ascii_uppercase(),
+            Self::Kebab => pascal_to_snake(variant).replace('_', "-"),
+            Self::ScreamingKebab => {
+                pascal_to_snake(variant).to_ascii_uppercase().replace('_', "-")
+            }
+        }
+    }
+}
+
+fn lower_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn pascal_to_snake(variant: &str) -> String {
+    let mut out = String::with_capacity(variant.len());
+    for (i, ch) in variant.char_indices() {
+        if i > 0 && ch.is_uppercase() {
+            out.push('_');
+        }
+        out.extend(ch.to_lowercase());
+    }
+    out
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -222,14 +278,39 @@ mod tests {
     }
 
     #[test]
-    fn rename_rules_convert_correctly() {
-        assert_eq!(RenameRule::Camel.apply("user_id"), "userId");
-        assert_eq!(RenameRule::Pascal.apply("user_id"), "UserId");
-        assert_eq!(RenameRule::Snake.apply("userId"), "user_id");
-        assert_eq!(RenameRule::Kebab.apply("user_id"), "user-id");
-        assert_eq!(RenameRule::ScreamingSnake.apply("user_id"), "USER_ID");
-        assert_eq!(RenameRule::Lower.apply("UserId"), "userid");
-        assert_eq!(RenameRule::Upper.apply("UserId"), "USERID");
+    fn field_rules_convert_from_snake_case() {
+        assert_eq!(RenameRule::Camel.apply_to_field("user_id"), "userId");
+        assert_eq!(RenameRule::Pascal.apply_to_field("user_id"), "UserId");
+        assert_eq!(RenameRule::Kebab.apply_to_field("user_id"), "user-id");
+        assert_eq!(RenameRule::ScreamingSnake.apply_to_field("user_id"), "USER_ID");
+        assert_eq!(RenameRule::ScreamingKebab.apply_to_field("user_id"), "USER-ID");
+        assert_eq!(RenameRule::Upper.apply_to_field("user_id"), "USER_ID");
+        // serde treats a field as already snake_case, so these are no-ops.
+        assert_eq!(RenameRule::Snake.apply_to_field("user_id"), "user_id");
+        assert_eq!(RenameRule::Lower.apply_to_field("user_id"), "user_id");
+    }
+
+    #[test]
+    fn variant_rules_convert_from_pascal_case() {
+        assert_eq!(RenameRule::Snake.apply_to_variant("KeyPress"), "key_press");
+        assert_eq!(RenameRule::Camel.apply_to_variant("KeyPress"), "keyPress");
+        assert_eq!(RenameRule::Kebab.apply_to_variant("KeyPress"), "key-press");
+        assert_eq!(RenameRule::ScreamingSnake.apply_to_variant("KeyPress"), "KEY_PRESS");
+        assert_eq!(RenameRule::ScreamingKebab.apply_to_variant("KeyPress"), "KEY-PRESS");
+        assert_eq!(RenameRule::Lower.apply_to_variant("KeyPress"), "keypress");
+        assert_eq!(RenameRule::Upper.apply_to_variant("KeyPress"), "KEYPRESS");
+        assert_eq!(RenameRule::Pascal.apply_to_variant("KeyPress"), "KeyPress");
+    }
+
+    #[test]
+    fn field_and_variant_rules_are_not_interchangeable() {
+        // The same rule on the same text must differ, because the two start
+        // from opposite conventions. Collapsing them into one function is the
+        // bug this split exists to prevent.
+        assert_ne!(
+            RenameRule::Snake.apply_to_field("KeyPress"),
+            RenameRule::Snake.apply_to_variant("KeyPress")
+        );
     }
 
     #[test]
