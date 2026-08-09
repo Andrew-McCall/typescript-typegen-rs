@@ -52,6 +52,10 @@ pub struct Field {
     pub ty: Ty,
     pub optional: bool,
     pub flatten: bool,
+    /// Emit `readonly` before the field name.
+    pub readonly: bool,
+    /// Splice the referenced type's shape here instead of importing it.
+    pub inline: bool,
     pub docs: Vec<String>,
 }
 

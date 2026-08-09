@@ -42,6 +42,11 @@ pub fn emit_ty(ty: &Ty, cfg: &Config) -> String {
     }
 }
 
+/// The `readonly ` prefix for a field, or the empty string.
+fn ro(f: &Field) -> &'static str {
+    if f.readonly { "readonly " } else { "" }
+}
+
 fn needs_parens(ty: &Ty) -> bool {
     matches!(ty, Ty::Union(arms) if arms.len() > 1)
 }
@@ -70,7 +75,7 @@ pub(crate) fn emit_object_inline(fields: &[Field], cfg: &Config) -> String {
         .iter()
         .map(|f| {
             let (q, ty) = optionality(f, cfg);
-            format!("{}{q}: {ty}", f.ts_name)
+            format!("{}{}{q}: {ty}", ro(f), f.ts_name)
         })
         .collect();
     format!("{{ {} }}", parts.join("; "))
@@ -122,7 +127,7 @@ fn emit_fields_block(fields: &[&Field], cfg: &Config) -> String {
     for f in fields {
         out.push_str(&tsdoc(&f.docs, INDENT));
         let (q, ty) = optionality(f, cfg);
-        out.push_str(&format!("{INDENT}{}{q}: {ty};\n", f.ts_name));
+        out.push_str(&format!("{INDENT}{}{}{q}: {ty};\n", ro(f), f.ts_name));
     }
     out.push('}');
     out
@@ -255,6 +260,8 @@ mod tests {
             ty,
             optional: false,
             flatten: false,
+            readonly: false,
+            inline: false,
             docs: vec![],
         }
     }
@@ -479,6 +486,8 @@ mod enum_tests {
             ty,
             optional: false,
             flatten: false,
+            readonly: false,
+            inline: false,
             docs: vec![],
         }
     }
@@ -568,5 +577,51 @@ mod enum_tests {
             vec![variant("T", VariantKind::Tuple(vec![Ty::Prim(Prim::Bool), Ty::Prim(Prim::Str)]))],
         );
         assert_eq!(emit_decl(&d, &Config::new()), "export type X = { T: [boolean, string] };\n");
+    }
+}
+
+#[cfg(test)]
+mod readonly_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::ir::{Body, Decl, Field, Prim, SourceLoc, Ty};
+
+    fn ro_field(name: &str, readonly: bool) -> Field {
+        Field {
+            rust_name: name.into(),
+            ts_name: name.into(),
+            ty: Ty::Prim(Prim::Str),
+            optional: false,
+            flatten: false,
+            readonly,
+            inline: false,
+            docs: vec![],
+        }
+    }
+
+    fn decl(body: Body) -> Decl {
+        Decl {
+            rust_path: "crate::X".into(),
+            ts_name: "X".into(),
+            docs: vec![],
+            generics: vec![],
+            body,
+            loc: SourceLoc { file: "x.rs".into(), line: 1 },
+        }
+    }
+
+    #[test]
+    fn readonly_fields_are_marked_and_others_are_not() {
+        let d = decl(Body::Struct(vec![ro_field("a", true), ro_field("b", false)]));
+        let out = emit_decl(&d, &Config::new());
+        assert!(out.contains("  readonly a: string;"), "got: {out}");
+        assert!(out.contains("  b: string;") && !out.contains("readonly b"), "got: {out}");
+    }
+
+    #[test]
+    fn readonly_survives_into_inline_objects() {
+        // Enum struct variants render inline; readonly must not be dropped there.
+        let inline = emit_object_inline(&[ro_field("a", true)], &Config::new());
+        assert_eq!(inline, "{ readonly a: string }");
     }
 }

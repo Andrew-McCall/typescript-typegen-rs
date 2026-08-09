@@ -80,10 +80,61 @@ never silent `unknown`.
 
 ## Attributes
 
-`#[ts(...)]` on a type, field, or variant: `rename`, `type = "..."`, `skip`,
-`optional`. `#[serde(...)]` is read too — `rename`, `rename_all`,
-`rename_all_fields`, `skip`, `skip_serializing_if`, `flatten`, `tag`,
-`content`, `untagged` — and `#[ts(...)]` wins wherever both apply.
+`#[ts(...)]` on a type, field, or variant:
+
+| Attribute | Where | Effect |
+|---|---|---|
+| `rename = "..."` | type, field, variant | Override the emitted name. |
+| `type = "..."` (or `as`) | field | Verbatim TypeScript; skips type lowering entirely. |
+| `skip` | field, variant | Omit from the output. |
+| `optional` | field | Force `?`, whatever serde says. |
+| `readonly` | type, field | Emit `readonly`. On a type it applies to every field. |
+| `inline` | field | Splice the referenced type's shape in place of importing it. |
+
+`#[serde(...)]` is read too — `rename`, `rename_all`, `rename_all_fields`,
+`skip`, `skip_serializing`, `skip_serializing_if`, `flatten`, `transparent`,
+`tag`, `content`, `untagged` — including serde's nested
+`rename(serialize = "...", deserialize = "...")` form, where only the
+serialize arm is used, since that is the shape being emitted. `#[ts(...)]`
+wins wherever both apply.
+
+Two serde attributes are deliberately ignored, because neither changes what
+serialization produces: `default` and `alias` affect deserialization only. Use
+`#[ts(optional)]` if you want a defaulted field marked optional anyway.
+
+`#[serde(with = "...")]` and `#[serde(serialize_with = "...")]` hand the wire
+format to code this crate cannot inspect, so the Rust type no longer describes
+the JSON. That is a build error naming the field, not a guess:
+
+```
+warning: ts-typegen: src/user.rs:75 field `dur` uses serde `with`/`serialize_with`,
+  so its wire type cannot be derived from its Rust type
+  help: give the shape explicitly with #[ts(type = "...")]
+```
+
+### readonly and inline
+
+```rust
+#[derive(Serialize, Ts)]
+#[ts(readonly)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditEntry {
+    pub actor_id: u64,
+    #[ts(inline)]
+    pub window: Span,
+}
+```
+
+```ts
+export interface AuditEntry {
+  readonly actorId: number;
+  readonly window: { startMs: number; endMs: number };
+}
+```
+
+Inlining is per-use: `Span` still gets its own file for anyone importing it
+normally. Enums cannot be inlined — they render as tagged unions, not object
+shapes — and asking for it is a diagnostic rather than a wrong shape.
 
 All four serde enum representations are supported, and the output matches what
 `serde_json` actually puts on the wire:

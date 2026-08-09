@@ -119,6 +119,8 @@ fn wire_field(name: &str, ty: Ty) -> Ty {
         ty,
         optional: false,
         flatten: false,
+        readonly: false,
+        inline: false,
         docs: vec![],
     }])
 }

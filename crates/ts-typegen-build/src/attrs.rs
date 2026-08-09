@@ -59,8 +59,21 @@ pub struct Attrs {
     pub tag: Option<String>,
     pub content: Option<String>,
     pub untagged: bool,
-    pub has_default: bool,
+    /// `#[ts(readonly)]` — emit `readonly` on this field, or on every field of
+    /// this type when set at container level.
+    pub readonly: bool,
+    /// `#[ts(inline)]` — splice the referenced type's shape in place of a
+    /// reference, instead of importing it.
+    pub inline: bool,
+    /// `#[serde(with)]` / `#[serde(serialize_with)]` — the wire shape is decided
+    /// by user code we cannot see, so the Rust type no longer describes it.
+    pub custom_ser: bool,
 }
+
+// `#[serde(default)]` is deliberately not tracked: it affects deserialization
+// only. A defaulted field is still always written during serialization, so it
+// cannot change the shape we emit. Use `#[ts(optional)]` to mark a field
+// optional regardless.
 
 pub fn parse_attrs(attrs: &[syn::Attribute]) -> Attrs {
     let mut out = Attrs::default();
@@ -91,18 +104,32 @@ fn apply_meta(out: &mut Attrs, meta: &syn::meta::ParseNestedMeta<'_>, is_ts: boo
     };
     match key.as_str() {
         "rename" => {
-            if let Some(v) = value() {
+            if let Some(v) = value().or_else(|| nested_serialize_value(meta)) {
                 out.rename = Some(v);
             }
         }
-        "rename_all" => out.rename_all = value().and_then(|v| RenameRule::parse(&v)),
-        "rename_all_fields" => out.rename_all_fields = value().and_then(|v| RenameRule::parse(&v)),
+        "rename_all" => {
+            if let Some(r) =
+                value().or_else(|| nested_serialize_value(meta)).and_then(|v| RenameRule::parse(&v))
+            {
+                out.rename_all = Some(r);
+            }
+        }
+        "rename_all_fields" => {
+            if let Some(r) =
+                value().or_else(|| nested_serialize_value(meta)).and_then(|v| RenameRule::parse(&v))
+            {
+                out.rename_all_fields = Some(r);
+            }
+        }
+        "with" | "serialize_with" => out.custom_ser = true,
+        "readonly" if is_ts => out.readonly = true,
+        "inline" if is_ts => out.inline = true,
         "tag" => out.tag = value(),
         "content" => out.content = value(),
         "untagged" => out.untagged = true,
         "transparent" => out.transparent = true,
         "flatten" => out.flatten = true,
-        "default" => out.has_default = true,
         "optional" if is_ts => out.optional = true,
         "skip" | "skip_serializing" => out.skip = true,
         "skip_serializing_if" => {
@@ -112,6 +139,27 @@ fn apply_meta(out: &mut Attrs, meta: &syn::meta::ParseNestedMeta<'_>, is_ts: boo
         "type" | "as" if is_ts => out.ts_type = value(),
         _ => {}
     }
+}
+
+/// Reads the `serialize = "..."` arm of serde's nested form, e.g.
+/// `rename(serialize = "a", deserialize = "b")`. The deserialize arm is
+/// deliberately dropped: it does not describe the shape we emit.
+fn nested_serialize_value(meta: &syn::meta::ParseNestedMeta<'_>) -> Option<String> {
+    let mut found = None;
+    meta.parse_nested_meta(|inner| {
+        let is_serialize = inner.path.is_ident("serialize");
+        // Every arm's literal must be parsed, not just its `=`. Leaving the
+        // deserialize arm's value on the stream makes syn stop at "expected `,`"
+        // and discard the serialize value already read.
+        if let Ok(lit) = inner.value().and_then(|v| v.parse::<syn::LitStr>())
+            && is_serialize
+        {
+            found = Some(lit.value());
+        }
+        Ok(())
+    })
+    .ok()?;
+    found
 }
 
 pub fn doc_lines(attrs: &[syn::Attribute]) -> Vec<String> {
@@ -198,5 +246,58 @@ mod tests {
     fn ts_type_escape_hatch_is_captured() {
         let a = attrs_of("#[ts(type = \"Record<string, never>\")] struct S;");
         assert_eq!(a.ts_type.as_deref(), Some("Record<string, never>"));
+    }
+}
+
+#[cfg(test)]
+mod nested_and_new_attr_tests {
+    use super::*;
+
+    fn attrs_of(src: &str) -> Attrs {
+        let item: syn::DeriveInput = syn::parse_str(src).expect("parse");
+        parse_attrs(&item.attrs)
+    }
+
+    #[test]
+    fn nested_rename_serialize_form_is_read() {
+        // serde allows #[serde(rename(serialize = "..", deserialize = ".."))].
+        // Only the serialize side describes the wire shape we emit.
+        let a = attrs_of("#[serde(rename(serialize = \"Ser\", deserialize = \"De\"))] struct S;");
+        assert_eq!(a.rename.as_deref(), Some("Ser"));
+    }
+
+    #[test]
+    fn nested_rename_deserialize_only_is_ignored() {
+        let a = attrs_of("#[serde(rename(deserialize = \"De\"))] struct S;");
+        assert_eq!(a.rename, None, "deserialize-only rename must not change output");
+    }
+
+    #[test]
+    fn nested_rename_all_serialize_form_is_read() {
+        let a = attrs_of("#[serde(rename_all(serialize = \"camelCase\"))] struct S;");
+        assert_eq!(a.rename_all, Some(RenameRule::Camel));
+    }
+
+    #[test]
+    fn custom_serialisation_is_flagged() {
+        assert!(attrs_of("#[serde(with = \"m\")] struct S;").custom_ser);
+        assert!(attrs_of("#[serde(serialize_with = \"f\")] struct S;").custom_ser);
+        assert!(!attrs_of("#[serde(deserialize_with = \"f\")] struct S;").custom_ser);
+        assert!(!attrs_of("struct S;").custom_ser);
+    }
+
+    #[test]
+    fn readonly_and_inline_flags_are_read() {
+        assert!(attrs_of("#[ts(readonly)] struct S;").readonly);
+        assert!(attrs_of("#[ts(inline)] struct S;").inline);
+        assert!(!attrs_of("struct S;").readonly);
+        assert!(!attrs_of("struct S;").inline);
+    }
+
+    #[test]
+    fn readonly_and_inline_are_ts_only_not_serde() {
+        // serde has no such options; a serde attr of the same name must not leak.
+        assert!(!attrs_of("#[serde(readonly)] struct S;").readonly);
+        assert!(!attrs_of("#[serde(inline)] struct S;").inline);
     }
 }
