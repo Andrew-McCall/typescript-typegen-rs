@@ -2,3 +2,4 @@
 #![forbid(unsafe_code)]
 
 pub mod ir;
+pub mod lower;
