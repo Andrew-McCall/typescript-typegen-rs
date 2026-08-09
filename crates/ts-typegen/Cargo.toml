@@ -12,4 +12,7 @@ ts-typegen-macros.workspace = true
 
 [features]
 default = []
-strict = []
+strict = ["ts-typegen-macros/strict"]
+
+[dev-dependencies]
+trybuild = "1.0.119"

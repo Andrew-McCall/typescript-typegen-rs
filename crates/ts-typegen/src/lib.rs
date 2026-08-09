@@ -6,3 +6,8 @@
 #![forbid(unsafe_code)]
 
 pub use ts_typegen_macros::Ts;
+
+#[cfg(feature = "strict")]
+mod marker;
+#[cfg(feature = "strict")]
+pub use marker::TsType;
