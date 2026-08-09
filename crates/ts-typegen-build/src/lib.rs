@@ -7,3 +7,4 @@ pub mod attrs;
 pub mod diag;
 pub mod parse;
 pub mod scan;
+pub mod config;
