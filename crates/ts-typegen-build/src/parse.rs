@@ -2,6 +2,7 @@
 
 use syn::spanned::Spanned;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::attrs::{Attrs, RenameRule, doc_lines, parse_attrs};
@@ -20,6 +21,100 @@ pub fn has_ts_derive(attrs: &[syn::Attribute]) -> bool {
         });
     }
     found
+}
+
+/// Merges fields that landed on the same TypeScript name into one field whose
+/// type is the union of theirs.
+///
+/// Two Rust fields can reach the same JSON key: `type_` and `r#type` both
+/// camelCase to `type`. serde accepts that and emits duplicate keys, but a
+/// TypeScript object type with a repeated key is a `tsc` error, so the binding
+/// has to collapse them. A union is the honest collapse — the key holds one of
+/// those types, and which one depends on the consumer's parser, so claiming
+/// either alone would be a guess. Rare enough to warn about rather than reject.
+fn merge_field_collisions(
+    fields: Vec<Field>,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<Field> {
+    let mut order: Vec<String> = Vec::with_capacity(fields.len());
+    let mut groups: HashMap<String, Vec<Field>> = HashMap::with_capacity(fields.len());
+    for f in fields {
+        if !groups.contains_key(&f.ts_name) {
+            order.push(f.ts_name.clone());
+        }
+        groups.entry(f.ts_name.clone()).or_default().push(f);
+    }
+
+    order
+        .into_iter()
+        .map(|name| {
+            let mut group = groups.remove(&name).expect("name came from the group keys");
+            if group.len() == 1 {
+                return group.pop().expect("length checked");
+            }
+
+            let rust_names: Vec<String> =
+                group.iter().map(|f| format!("`{}`", f.rust_name)).collect();
+            let (listed, quantifier) = match rust_names.as_slice() {
+                [a, b] => (format!("{a} and {b}"), "both"),
+                rest => (rest.join(", "), "all"),
+            };
+            diags.push(
+                Diagnostic::warning(
+                    loc.clone(),
+                    format!("fields {listed} {quantifier} map to the TypeScript name `{name}`"),
+                )
+                .with_help(
+                    "the binding uses a union of their types; rename one with \
+                     #[ts(rename = \"...\")] to be explicit",
+                ),
+            );
+
+            // Distinct types only: two fields of the same type collapse to that
+            // type rather than to a pointless `T | T`.
+            let mut tys: Vec<Ty> = Vec::with_capacity(group.len());
+            for f in &group {
+                if !tys.contains(&f.ty) {
+                    tys.push(f.ty.clone());
+                }
+            }
+            let ty = if tys.len() == 1 { tys.remove(0) } else { Ty::Union(tys) };
+
+            let first = group.first().expect("non-empty");
+            Field {
+                rust_name: first.rust_name.clone(),
+                ts_name: name,
+                ty,
+                // The key is absent only if every contributor omits it.
+                optional: group.iter().all(|f| f.optional),
+                flatten: group.iter().any(|f| f.flatten),
+                readonly: group.iter().any(|f| f.readonly),
+                inline: group.iter().any(|f| f.inline),
+                docs: first.docs.clone(),
+            }
+        })
+        .collect()
+}
+
+/// The same clash, one level up: two variants sharing a discriminant value make
+/// the union arms indistinguishable.
+fn check_variant_collisions(variants: &[Variant], loc: &SourceLoc, diags: &mut Diagnostics) {
+    let mut seen: HashMap<&str, &str> = HashMap::with_capacity(variants.len());
+    for v in variants {
+        if let Some(previous) = seen.insert(&v.ts_name, &v.rust_name) {
+            diags.push(
+                Diagnostic::warning(
+                    loc.clone(),
+                    format!(
+                        "variants `{previous}` and `{}` both map to the TypeScript name `{}`",
+                        v.rust_name, v.ts_name
+                    ),
+                )
+                .with_help("rename one with #[ts(rename = \"...\")]"),
+            );
+        }
+    }
 }
 
 /// Strips the `r#` from a raw identifier.
@@ -236,7 +331,8 @@ fn struct_body(
     }
     match &s.fields {
         syn::Fields::Named(n) => {
-            Body::Struct(named_fields(n, attrs.rename_all, ctx, attrs.readonly))
+            let fields = named_fields(n, attrs.rename_all, ctx, attrs.readonly);
+            Body::Struct(merge_field_collisions(fields, loc, diags))
         }
         syn::Fields::Unnamed(u) => {
             let mut tys = unnamed_types(u, ctx);
@@ -275,7 +371,9 @@ fn enum_body(
                 syn::Fields::Named(n) => {
                     // A variant-level rename_all overrides the container default.
                     let rule = va.rename_all.or(attrs.rename_all_fields);
-                    VariantKind::Struct(named_fields(n, rule, ctx, attrs.readonly))
+                    let fields = named_fields(n, rule, ctx, attrs.readonly);
+                    let loc = loc_of(file, v.ident.span());
+                    VariantKind::Struct(merge_field_collisions(fields, &loc, diags))
                 }
                 syn::Fields::Unnamed(u) => {
                     let mut tys = unnamed_types(u, ctx);
@@ -294,6 +392,8 @@ fn enum_body(
             })
         })
         .collect();
+
+    check_variant_collisions(&variants, &loc_of(file, e.variants.first().map(|v| v.ident.span()).unwrap_or_else(proc_macro2::Span::call_site)), diags);
 
     let repr = if attrs.untagged {
         EnumRepr::Untagged
@@ -613,5 +713,168 @@ mod attribute_behaviour_tests {
         let d = ok("#[derive(Ts)] #[ts(readonly)] struct S { a: u8, b: u8 }");
         let Body::Struct(f) = d.body else { panic!() };
         assert!(f.iter().all(|x| x.readonly), "container readonly must reach all fields");
+    }
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+
+    fn parse(src: &str) -> (Option<Decl>, Diagnostics) {
+        let item: syn::DeriveInput = syn::parse_str(src).expect("parse");
+        let mut diags = Diagnostics::default();
+        let decl = parse_item(&item, "crate", Path::new("t.rs"), &LowerCtx::default(), &mut diags);
+        (decl, diags)
+    }
+
+    /// Collisions are warnings, never errors: the build must still succeed.
+    fn collision_messages(src: &str) -> Vec<String> {
+        let (_, diags) = parse(src);
+        assert!(!diags.has_errors(), "a name collision must not fail the build");
+        diags
+            .iter()
+            .map(|d| d.message.clone())
+            .filter(|m| m.contains("all map to") || m.contains("both map to"))
+            .collect()
+    }
+
+    #[test]
+    fn two_fields_renamed_to_the_same_key_is_an_error() {
+        // serde emits {"same":1,"same":2}; JSON.parse keeps only the last.
+        let msgs = collision_messages(
+            "#[derive(Ts)] struct S { #[serde(rename = \"same\")] a: u8, \
+             #[serde(rename = \"same\")] b: u8 }",
+        );
+        assert_eq!(msgs.len(), 1, "expected exactly one collision, got {msgs:?}");
+        assert!(msgs[0].contains("`same`"), "{}", msgs[0]);
+    }
+
+    #[test]
+    fn a_raw_identifier_colliding_with_its_escaped_twin_is_caught() {
+        // Both camelCase to `type` — the case the fidelity suite tripped over.
+        let msgs = collision_messages(
+            "#[derive(Ts)] #[serde(rename_all = \"camelCase\")] \
+             struct S { type_: u8, r#type: u8 }",
+        );
+        assert_eq!(msgs.len(), 1, "got {msgs:?}");
+    }
+
+    #[test]
+    fn colliding_enum_variants_are_caught() {
+        let msgs = collision_messages(
+            "#[derive(Ts)] enum E { #[serde(rename = \"x\")] A, #[serde(rename = \"x\")] B }",
+        );
+        assert_eq!(msgs.len(), 1, "got {msgs:?}");
+        assert!(msgs[0].contains("variants"), "{}", msgs[0]);
+    }
+
+    #[test]
+    fn colliding_fields_inside_a_struct_variant_are_caught() {
+        let msgs = collision_messages(
+            "#[derive(Ts)] enum E { V { #[serde(rename = \"y\")] a: u8, \
+             #[serde(rename = \"y\")] b: u8 } }",
+        );
+        assert_eq!(msgs.len(), 1, "got {msgs:?}");
+    }
+
+    #[test]
+    fn distinct_names_produce_no_diagnostic() {
+        assert!(collision_messages("#[derive(Ts)] struct S { a: u8, b: u8 }").is_empty());
+        assert!(collision_messages("#[derive(Ts)] enum E { A, B }").is_empty());
+        assert!(
+            collision_messages(
+                "#[derive(Ts)] #[serde(rename_all = \"camelCase\")] \
+                 struct S { user_id: u8, user_name: u8 }"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_skipped_field_cannot_collide() {
+        // It never reaches the output, so it cannot clash with anything.
+        assert!(
+            collision_messages(
+                "#[derive(Ts)] struct S { #[serde(rename = \"same\")] a: u8, \
+                 #[serde(skip)] #[serde(rename = \"same\")] b: u8 }"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn separate_variants_may_reuse_field_names() {
+        // Each variant is its own object; only same-level clashes matter.
+        assert!(
+            collision_messages("#[derive(Ts)] enum E { A { x: u8 }, B { x: u8 } }").is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod collision_output_tests {
+    use super::*;
+    use crate::ir::Prim;
+
+    fn body_of(src: &str) -> Body {
+        let item: syn::DeriveInput = syn::parse_str(src).expect("parse");
+        let mut diags = Diagnostics::default();
+        let d = parse_item(&item, "crate", Path::new("t.rs"), &LowerCtx::default(), &mut diags);
+        assert!(!diags.has_errors(), "collisions must not fail the build");
+        d.expect("decl").body
+    }
+
+    #[test]
+    fn colliding_fields_collapse_to_one_key_with_a_union_type() {
+        // A repeated key in a TS object type is a tsc error, so the output must
+        // carry the name once. The union keeps both possibilities.
+        let Body::Struct(f) = body_of(
+            "#[derive(Ts)] struct S { #[serde(rename = \"v\")] a: u8, \
+             #[serde(rename = \"v\")] b: String }",
+        ) else {
+            panic!("expected struct")
+        };
+        assert_eq!(f.len(), 1, "duplicate key would be invalid TypeScript");
+        assert_eq!(f[0].ts_name, "v");
+        assert_eq!(
+            f[0].ty,
+            Ty::Union(vec![Ty::Prim(Prim::Int { bits: 8, signed: false }), Ty::Prim(Prim::Str)])
+        );
+    }
+
+    #[test]
+    fn identical_types_collapse_without_a_pointless_union() {
+        let Body::Struct(f) = body_of(
+            "#[derive(Ts)] #[serde(rename_all = \"camelCase\")] \
+             struct S { type_: u8, r#type: u8 }",
+        ) else {
+            panic!()
+        };
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].ty, Ty::Prim(Prim::Int { bits: 8, signed: false }), "expected u8, not u8|u8");
+    }
+
+    #[test]
+    fn the_merged_key_is_optional_only_if_every_contributor_is() {
+        let Body::Struct(f) = body_of(
+            "#[derive(Ts)] struct S { #[serde(rename = \"v\")] a: u8, \
+             #[serde(rename = \"v\", skip_serializing_if = \"x\")] b: u8 }",
+        ) else {
+            panic!()
+        };
+        assert!(!f[0].optional, "one field always writes the key, so it is not optional");
+    }
+
+    #[test]
+    fn three_way_collisions_merge_too() {
+        let Body::Struct(f) = body_of(
+            "#[derive(Ts)] struct S { #[serde(rename = \"v\")] a: u8, \
+             #[serde(rename = \"v\")] b: bool, #[serde(rename = \"v\")] c: String }",
+        ) else {
+            panic!()
+        };
+        assert_eq!(f.len(), 1);
+        let Ty::Union(arms) = &f[0].ty else { panic!("expected a union") };
+        assert_eq!(arms.len(), 3);
     }
 }

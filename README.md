@@ -112,6 +112,30 @@ warning: ts-typegen: src/user.rs:75 field `dur` uses serde `with`/`serialize_wit
   help: give the shape explicitly with #[ts(type = "...")]
 ```
 
+### Name collisions
+
+Two Rust fields can land on the same JSON key — `type_` and `r#type` both
+camelCase to `type`. serde permits this and emits duplicate keys; a TypeScript
+object type with a repeated key does not compile, so the binding collapses them
+into a union and warns:
+
+```
+warning: ts-typegen: src/user.rs:75 fields `type_` and `type` both map to the
+  TypeScript name `type`
+  help: the binding uses a union of their types; rename one with
+        #[ts(rename = "...")] to be explicit
+```
+
+```ts
+export interface Clash {
+  type: number | string;
+}
+```
+
+Fields of the same type collapse without a redundant `T | T`. This is a warning
+rather than an error because it is rare and the output stays valid — but the
+underlying JSON is ambiguous, so renaming one field is the real fix.
+
 ### readonly and inline
 
 ```rust

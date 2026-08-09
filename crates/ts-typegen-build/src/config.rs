@@ -162,6 +162,9 @@ impl Config {
 
         match crate::run::generate(&self) {
             Ok(outcome) => {
+                for line in outcome.warnings.iter().flat_map(|w| w.lines()) {
+                    println!("cargo::warning=ts-typegen: {line}");
+                }
                 for name in &outcome.report.removed {
                     println!("cargo::warning=ts-typegen: removed stale binding {name}");
                 }

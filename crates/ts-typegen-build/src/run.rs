@@ -15,6 +15,8 @@ pub struct Outcome {
     pub report: WriteReport,
     /// True when generation was skipped because this is not a primary package.
     pub skipped: bool,
+    /// Non-fatal diagnostics, already formatted for display.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -45,7 +47,7 @@ fn is_downstream_build() -> bool {
 
 pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
     if !cfg.always_run_enabled() && is_downstream_build() {
-        return Ok(Outcome { report: WriteReport::default(), skipped: true });
+        return Ok(Outcome { report: WriteReport::default(), skipped: true, warnings: Vec::new() });
     }
 
     let ctx = LowerCtx { params: Default::default(), map: cfg.type_map().clone() };
@@ -53,20 +55,28 @@ pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
     let reg = scan_roots(cfg.scans(), &ctx, &mut diags);
     let files = render_all(&reg, cfg, &mut diags);
 
-    if !diags.is_empty() {
+    let render = |d: &crate::diag::Diagnostic| {
+        let mut s = format!("{}:{} {}", d.loc.file.display(), d.loc.line, d.message);
+        if let Some(help) = &d.help {
+            s.push_str(&format!("\n  help: {help}"));
+        }
+        s
+    };
+
+    if diags.has_errors() {
+        // Warnings ride along in the failure text so one build shows everything.
         let mut msg = String::new();
         for d in diags.iter() {
-            msg.push_str(&format!("{}:{} {}\n", d.loc.file.display(), d.loc.line, d.message));
-            if let Some(help) = &d.help {
-                msg.push_str(&format!("  help: {help}\n"));
-            }
+            msg.push_str(&render(d));
+            msg.push('\n');
         }
-        msg.push_str(&format!("{} error(s)", diags.len()));
+        msg.push_str(&format!("{} error(s)", diags.error_count()));
         return Err(Box::new(DiagError(msg)));
     }
 
+    let warnings: Vec<String> = diags.iter().map(render).collect();
     let report = write_all(&files, cfg)?;
-    Ok(Outcome { report, skipped: false })
+    Ok(Outcome { report, skipped: false, warnings })
 }
 
 #[cfg(test)]
