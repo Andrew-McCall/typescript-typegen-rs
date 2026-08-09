@@ -154,6 +154,10 @@ impl Config {
         for root in &self.scans {
             println!("cargo::rerun-if-changed={}", root.display());
         }
+        // Watching the output directory too means deleting bindings/ regenerates
+        // it: cargo always reruns when a watched path is missing. Writes are
+        // idempotent, so this settles after one extra run instead of looping.
+        println!("cargo::rerun-if-changed={}", self.output.display());
         println!("cargo::rerun-if-env-changed=TS_TYPEGEN_CHECK");
 
         match crate::run::generate(&self) {

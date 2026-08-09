@@ -28,8 +28,23 @@ impl fmt::Display for DiagError {
 
 impl Error for DiagError {}
 
+/// True when the manifest lives inside cargo's registry cache or a git
+/// checkout, i.e. this crate is being compiled as somebody else's dependency.
+///
+/// `CARGO_PRIMARY_PACKAGE` is deliberately not used: cargo sets it for rustc
+/// invocations, not for build scripts, so gating on it would disable generation
+/// for every user rather than only for downstream consumers.
+pub(crate) fn looks_vendored(manifest_dir: &str) -> bool {
+    let dir = manifest_dir.replace('\\', "/");
+    dir.contains("/registry/src/") || dir.contains("/git/checkouts/")
+}
+
+fn is_downstream_build() -> bool {
+    std::env::var("CARGO_MANIFEST_DIR").is_ok_and(|d| looks_vendored(&d))
+}
+
 pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
-    if !cfg.always_run_enabled() && std::env::var_os("CARGO_PRIMARY_PACKAGE").is_none() {
+    if !cfg.always_run_enabled() && is_downstream_build() {
         return Ok(Outcome { report: WriteReport::default(), skipped: true });
     }
 
@@ -52,4 +67,27 @@ pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
 
     let report = write_all(&files, cfg)?;
     Ok(Outcome { report, skipped: false })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_vendored;
+
+    #[test]
+    fn registry_and_git_checkouts_are_downstream_builds() {
+        assert!(looks_vendored(
+            "/home/u/.cargo/registry/src/index.crates.io-6f17d22bba15001f/demo-0.1.0"
+        ));
+        assert!(looks_vendored("/home/u/.cargo/git/checkouts/demo-abc123/deadbee"));
+        assert!(looks_vendored(
+            r"C:\Users\u\.cargo\registry\src\index.crates.io-6f17\demo-0.1.0"
+        ));
+    }
+
+    #[test]
+    fn a_normal_project_directory_is_not_a_downstream_build() {
+        assert!(!looks_vendored("/home/u/Develop/my-api"));
+        assert!(!looks_vendored("/home/u/Develop/registry-service/src"));
+        assert!(!looks_vendored("/work/git/my-project"));
+    }
 }

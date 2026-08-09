@@ -105,11 +105,12 @@ fn renaming_a_type_sweeps_the_old_binding() {
 }
 
 #[test]
-fn generation_is_skipped_for_non_primary_packages() {
+fn a_local_project_generates_without_always_run() {
+    // The downstream-build gate must not fire for an ordinary project, or the
+    // crate would silently do nothing for every user.
     let dir = project(&[("src/lib.rs", "#[derive(Ts)] pub struct S { pub v: u8 }\n")]);
-    // always_run defaults to false; CARGO_PRIMARY_PACKAGE is unset under `cargo test`.
     let cfg = Config::new().scan(dir.path().join("src")).output(dir.path().join("bindings"));
     let outcome = generate(&cfg).unwrap();
-    assert!(outcome.skipped);
-    assert!(!dir.path().join("bindings").exists());
+    assert!(!outcome.skipped, "generation must run for a local project");
+    assert!(dir.path().join("bindings/S.ts").is_file());
 }
