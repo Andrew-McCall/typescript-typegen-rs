@@ -93,8 +93,14 @@ writes them at full precision -- `340282366920938463463374607431768211455` -- so
 .int64(BigInt::Number).int128(BigInt::Bigint)
 ```
 
-The defaults stay `Number` throughout, because that is what serde_json actually
-puts on the wire; see the note on `bigint` below.
+The defaults stay `Number` throughout because that is what `serde_json` actually
+puts on the wire, and `JSON.parse` really does hand you a `number`. Declaring
+`bigint` while parsing with `JSON.parse` would be a type that lies about the
+runtime value. Change it when your decoder genuinely produces BigInts — a
+reviver, `json-bigint`, msgpack — not merely because the Rust type is wide.
+
+`Str` changes only the binding, never what serde writes: use it when the Rust
+side already serializes those fields as strings.
 
 ## Attributes
 
