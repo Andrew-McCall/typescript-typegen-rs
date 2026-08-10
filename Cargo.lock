@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "ts-typegen"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "serde",
  "trybuild",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "ts-typegen-build"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "proc-macro2",
  "serde",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "ts-typegen-macros"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
