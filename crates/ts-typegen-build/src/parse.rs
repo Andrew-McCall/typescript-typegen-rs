@@ -273,7 +273,7 @@ fn check_custom_serialisation(item: &syn::DeriveInput, file: &Path, diags: &mut 
 
 fn field_ty(f: &syn::Field, fa: &Attrs, ctx: &LowerCtx) -> Ty {
     match &fa.ts_type {
-        Some(raw) => Ty::Raw(raw.clone()),
+        Some(raw) => Ty::Raw { name: raw.clone(), args: vec![] },
         None => lower_type(&f.ty, ctx),
     }
 }
@@ -514,7 +514,7 @@ mod tests {
     fn ts_type_short_circuits_lowering() {
         let d = ok("#[derive(Ts)] struct S { #[ts(type = \"string\")] v: Whatever }");
         let Body::Struct(f) = d.body else { panic!() };
-        assert_eq!(f[0].ty, Ty::Raw("string".into()));
+        assert_eq!(f[0].ty, Ty::Raw { name: "string".into(), args: vec![] });
     }
 
     #[test]
@@ -670,7 +670,7 @@ mod attribute_behaviour_tests {
     fn custom_serialisation_with_a_ts_type_override_is_accepted() {
         let d = ok("#[derive(Ts)] struct S { #[serde(with = \"m\")] #[ts(type = \"string\")] v: u32 }");
         let Body::Struct(f) = d.body else { panic!() };
-        assert_eq!(f[0].ty, Ty::Raw("string".into()));
+        assert_eq!(f[0].ty, Ty::Raw { name: "string".into(), args: vec![] });
     }
 
     #[test]

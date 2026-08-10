@@ -46,7 +46,11 @@ pub fn emit_ty(ty: &Ty, cfg: &Config) -> String {
             format!("{name}<{}>", parts.join(", "))
         }
         Ty::Param(name) => name.clone(),
-        Ty::Raw(raw) => raw.clone(),
+        Ty::Raw { name, args } if args.is_empty() => name.clone(),
+        Ty::Raw { name, args } => {
+            let parts: Vec<String> = args.iter().map(|t| emit_ty(t, cfg)).collect();
+            format!("{name}<{}>", parts.join(", "))
+        }
         Ty::Unknown => match cfg.unknown_style() {
             UnknownStyle::Unknown => "unknown".to_string(),
             UnknownStyle::Any => "any".to_string(),
@@ -328,7 +332,10 @@ mod tests {
         assert_eq!(emit_ty(&Ty::Prim(Prim::Float), &c), "number");
         assert_eq!(emit_ty(&Ty::Prim(Prim::Null), &c), "null");
         assert_eq!(emit_ty(&Ty::Unknown, &c), "unknown");
-        assert_eq!(emit_ty(&Ty::Raw("Foo<Bar>".into()), &c), "Foo<Bar>");
+        assert_eq!(
+            emit_ty(&Ty::Raw { name: "Foo<Bar>".into(), args: vec![] }, &c),
+            "Foo<Bar>"
+        );
     }
 
     #[test]

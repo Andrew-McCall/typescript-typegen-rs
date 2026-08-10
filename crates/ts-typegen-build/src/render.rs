@@ -224,7 +224,11 @@ fn collect_ty_refs(ty: &Ty, out: &mut BTreeSet<String>) {
             collect_ty_refs(value, out);
         }
         Ty::Object(fields) => fields.iter().for_each(|f| collect_ty_refs(&f.ty, out)),
-        Ty::Prim(_) | Ty::Param(_) | Ty::Raw(_) | Ty::Unknown => {}
+        // The raw name itself is verbatim text, never imported, but its
+        // generic arguments (from a `map_type` match against a generic Rust
+        // type) may still reference real declarations.
+        Ty::Raw { args, .. } => args.iter().for_each(|a| collect_ty_refs(a, out)),
+        Ty::Prim(_) | Ty::Param(_) | Ty::Unknown => {}
     }
 }
 

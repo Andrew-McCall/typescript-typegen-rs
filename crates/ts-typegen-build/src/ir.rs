@@ -69,7 +69,14 @@ pub enum Ty {
     /// A generic type parameter of the enclosing declaration.
     Param(String),
     /// Verbatim TypeScript from `#[ts(type = "...")]` or a config type mapping.
-    Raw(String),
+    Raw {
+        /// The TS text to emit, unimported and unchecked.
+        name: String,
+        /// Generic arguments carried over from the source Rust type, e.g. the
+        /// `T` in a `.map_type("some::Wrapper", "Wrapper")` match against
+        /// `Wrapper<T>`. Rendered as `name<arg0, arg1, ...>` when non-empty.
+        args: Vec<Ty>,
+    },
     /// An opaque value with no known shape, e.g. `serde_json::Value`. Renders
     /// as `unknown` or `any` depending on [`crate::config::Config::unknown_type`].
     Unknown,

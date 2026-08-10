@@ -136,6 +136,15 @@ applies whether a field writes `uuid::Uuid` or a bare `Uuid` brought in by
 `Str` changes only the binding, never what serde writes: use it when the Rust
 side already serializes those fields as strings.
 
+### Generic foreign types
+
+`.map_type` forwards generic arguments instead of discarding them: matching
+`mycrate::Wrapper<T>` against `.map_type("mycrate::Wrapper", "TsWrapper")`
+renders `TsWrapper<T>`, with `T` lowered like anywhere else — a primitive, a
+scanned type (which still gets imported), or a param of the enclosing
+declaration. Write the target name bare, without its own `<...>`; the
+argument list is appended for you.
+
 ## Attributes
 
 `#[ts(...)]` on a type, field, or variant:

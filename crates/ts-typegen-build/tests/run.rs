@@ -68,6 +68,24 @@ fn map_type_override_reaches_the_output() {
 }
 
 #[test]
+fn map_type_forwards_generic_arguments_and_imports_what_they_reference() {
+    let dir = project(&[(
+        "src/lib.rs",
+        "#[derive(Ts)] pub struct Inner { pub v: String }\n\
+         #[derive(Ts)] pub struct S { pub w: mycrate::Wrapper<Inner> }\n",
+    )]);
+    let cfg = Config::new()
+        .scan(dir.path().join("src"))
+        .output(dir.path().join("bindings"))
+        .map_type("mycrate::Wrapper", "TsWrapper")
+        .always_run(true);
+    generate(&cfg).unwrap();
+    let s = fs::read_to_string(dir.path().join("bindings/S.ts")).unwrap();
+    assert!(s.contains("w: TsWrapper<Inner>;"), "{s}");
+    assert!(s.contains("import type { Inner } from \"./Inner\";"), "{s}");
+}
+
+#[test]
 fn diagnostics_fail_the_build_and_name_every_problem() {
     let dir = project(&[(
         "src/lib.rs",

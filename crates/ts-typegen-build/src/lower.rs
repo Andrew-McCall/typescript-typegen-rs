@@ -72,9 +72,11 @@ fn lower_path(p: &syn::TypePath, ctx: &LowerCtx) -> Ty {
     let name = seg.ident.to_string();
     let args = type_args(seg, ctx);
 
-    // Config overrides win before anything else.
+    // Config overrides win before anything else. Generic arguments on the
+    // matched Rust type carry over, e.g. `Wrapper<T>` mapped to `"TsWrapper"`
+    // renders as `TsWrapper<T>`.
     if let Some(raw) = ctx.map.get(&name) {
-        return Ty::Raw(raw.to_string());
+        return Ty::Raw { name: raw.to_string(), args };
     }
 
     // A bare, unqualified identifier matching a declared type parameter.
@@ -370,9 +372,9 @@ mod tests {
             ..LowerCtx::default()
         };
         let ty: syn::Type = syn::parse_str("uuid::Uuid").unwrap();
-        assert_eq!(lower_type(&ty, &ctx), Ty::Raw("string".into()));
+        assert_eq!(lower_type(&ty, &ctx), Ty::Raw { name: "string".into(), args: vec![] });
         let bare: syn::Type = syn::parse_str("Uuid").unwrap();
-        assert_eq!(lower_type(&bare, &ctx), Ty::Raw("string".into()));
+        assert_eq!(lower_type(&bare, &ctx), Ty::Raw { name: "string".into(), args: vec![] });
     }
 
     #[test]
@@ -381,6 +383,26 @@ mod tests {
             lower("Page<String>"),
             Ty::Ref {
                 name: "Page".into(),
+                args: vec![Ty::Prim(Prim::Str)]
+            }
+        );
+    }
+
+    #[test]
+    fn mapped_generic_types_carry_their_arguments() {
+        // A `map_type` match against a generic Rust type forwards its
+        // arguments instead of discarding them.
+        let mut map = TypeMap::default();
+        map.insert("some::Wrapper", "TsWrapper");
+        let ctx = LowerCtx {
+            map,
+            ..LowerCtx::default()
+        };
+        let ty: syn::Type = syn::parse_str("some::Wrapper<String>").unwrap();
+        assert_eq!(
+            lower_type(&ty, &ctx),
+            Ty::Raw {
+                name: "TsWrapper".into(),
                 args: vec![Ty::Prim(Prim::Str)]
             }
         );
