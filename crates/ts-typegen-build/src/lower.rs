@@ -91,8 +91,12 @@ fn lower_path(p: &syn::TypePath, ctx: &LowerCtx) -> Ty {
     }
     if MAPS.contains(&name.as_str()) {
         let mut it = args.into_iter();
+        // The Rust key type is irrelevant to the binding: serde_json always
+        // writes map keys as JSON object keys, which are strings whatever the
+        // Rust side is -- HashMap<i32, V> serialises as {"7": ...}, not {7: ...}.
+        it.next();
         return Ty::Record {
-            key: Box::new(it.next().unwrap_or(Ty::Unknown)),
+            key: Box::new(Ty::Prim(Prim::Str)),
             value: Box::new(it.next().unwrap_or(Ty::Unknown)),
         };
     }
@@ -371,6 +375,67 @@ mod tests {
             Ty::Ref {
                 name: "Page".into(),
                 args: vec![Ty::Prim(Prim::Str)]
+            }
+        );
+    }
+
+    #[test]
+    fn nonzero_integers_lower_to_the_same_width_as_their_plain_counterpart() {
+        // serde_json serialises NonZeroU32 as a plain number, same as u32, so the
+        // binding must be identical -- only the Rust side enforces non-zero-ness.
+        assert_eq!(
+            lower("std::num::NonZeroU32"),
+            Ty::Prim(Prim::Int {
+                bits: 32,
+                signed: false
+            })
+        );
+        assert_eq!(
+            lower("NonZeroI8"),
+            Ty::Prim(Prim::Int {
+                bits: 8,
+                signed: true
+            })
+        );
+        assert_eq!(
+            lower("NonZeroUsize"),
+            Ty::Prim(Prim::Int {
+                bits: 64,
+                signed: false
+            })
+        );
+    }
+
+    #[test]
+    fn map_keys_are_always_strings_regardless_of_the_rust_key_type() {
+        // serde_json writes every map key as a JSON object key, i.e. a string,
+        // whatever the Rust key type is: HashMap<i32, V> serialises as
+        // {"7": ...}, never {7: ...}.
+        assert_eq!(
+            lower("std::collections::HashMap<i32, String>"),
+            Ty::Record {
+                key: Box::new(Ty::Prim(Prim::Str)),
+                value: Box::new(Ty::Prim(Prim::Str)),
+            }
+        );
+        assert_eq!(
+            lower("BTreeMap<u64, bool>"),
+            Ty::Record {
+                key: Box::new(Ty::Prim(Prim::Str)),
+                value: Box::new(Ty::Prim(Prim::Bool)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_name_merely_prefixed_with_nonzero_falls_back_to_a_reference() {
+        // Not a real NonZero* type, so there is no narrower primitive to report;
+        // treating it as an ordinary reference is the honest fallback.
+        assert_eq!(
+            lower("NonZeroFrobnicator"),
+            Ty::Ref {
+                name: "NonZeroFrobnicator".into(),
+                args: vec![]
             }
         );
     }

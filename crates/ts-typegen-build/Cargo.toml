@@ -1,11 +1,20 @@
 [package]
 name = "ts-typegen-build"
-description = "Build-time TypeScript binding generator for ts-typegen"
+description = "Build script that scans Rust sources and writes TypeScript type bindings for every #[derive(Ts)] struct and enum"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["typescript", "codegen", "serde", "bindings", "build-script"]
+categories = [
+    "development-tools::build-utils",
+    "development-tools::ffi",
+    "web-programming",
+    "encoding",
+]
 
 [dependencies]
 syn.workspace = true

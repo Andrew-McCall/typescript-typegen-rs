@@ -1,13 +1,23 @@
 # ts-typegen
 
+[![crates.io](https://img.shields.io/crates/v/ts-typegen.svg)](https://crates.io/crates/ts-typegen)
+[![docs.rs](https://docs.rs/ts-typegen/badge.svg)](https://docs.rs/ts-typegen)
+[![license](https://img.shields.io/crates/l/ts-typegen.svg)](LICENSE)
+
 Generate TypeScript types from Rust structs and enums, at build time.
+
+One `#[derive(Ts)]` and a three-line `build.rs` turn your Rust types into
+`.ts` interfaces and unions that match what `serde_json` actually puts on the
+wire — every `rename_all`, `skip`, `flatten`, `transparent`, and tagged-enum
+representation included. Plain `cargo build` keeps them in sync; `TS_TYPEGEN_CHECK=1`
+fails CI when they drift.
 
 ```toml
 [dependencies]
-ts-typegen = "0.1"
+ts-typegen = "1"
 
 [build-dependencies]
-ts-typegen-build = "0.1"
+ts-typegen-build = "1"
 ```
 
 ```rust
@@ -98,6 +108,30 @@ puts on the wire, and `JSON.parse` really does hand you a `number`. Declaring
 `bigint` while parsing with `JSON.parse` would be a type that lies about the
 runtime value. Change it when your decoder genuinely produces BigInts — a
 reviver, `json-bigint`, msgpack — not merely because the Rust type is wide.
+
+### Presets
+
+`.preset(Preset)` installs `map_type` entries for a foreign crate in one call.
+Every mapping targets `string`, matching how each type actually serialises —
+never a structural guess. A later `.map_type(...)` call overrides a preset.
+
+| Preset | Covers |
+|---|---|
+| `Preset::Uuid` | `uuid::Uuid` |
+| `Preset::Chrono` | `chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Duration}` |
+| `Preset::Time` | `time::{OffsetDateTime, PrimitiveDateTime, Date, Time}` |
+| `Preset::Url` | `url::Url` |
+| `Preset::Decimal` | `rust_decimal::Decimal`, `bigdecimal::BigDecimal` |
+| `Preset::Bytes` | `bytes::Bytes` |
+| `Preset::Common` | Every preset above, unioned together. |
+
+```rust
+ts_typegen_build::Config::new().preset(ts_typegen_build::Preset::Common)
+```
+
+Matching is by the type's final path segment (like `map_type`), so this
+applies whether a field writes `uuid::Uuid` or a bare `Uuid` brought in by
+`use`.
 
 `Str` changes only the binding, never what serde writes: use it when the Rust
 side already serializes those fields as strings.
@@ -214,7 +248,7 @@ writing. Commit your bindings and this keeps them from drifting.
 ## Strict mode
 
 ```toml
-ts-typegen = { version = "0.1", features = ["strict"] }
+ts-typegen = { version = "1", features = ["strict"] }
 ```
 
 The derive additionally emits a zero-cost marker assertion per field, so a type
@@ -235,6 +269,74 @@ Writing into your source tree from a build script is unusual, so:
   dependency from the registry or a git checkout, so consumers never attempt to
   write into a read-only cache. Override with `.always_run(true)`.
 
+## Foreign types you don't own
+
+`.map_type()` and `#[ts(type = "...")]` both hand-write a TS string, which is
+fine for an opaque scalar (a timestamp, a decimal) but doesn't scale to a
+*structured* foreign type used in several places: every field pays the string
+again, and nothing catches them drifting out of sync when the shape changes.
+
+Reference resolution is by name against the registry, not by where a
+declaration came from (`render.rs` matches a field's `Ty::Ref` against
+whatever `#[derive(Ts)]` type has that name, regardless of module or crate).
+So a small local struct that only exists to describe the wire shape — a
+"shadow" of the foreign type — gets picked up by every field that names it,
+with a real import, for the price of writing it once:
+
+```rust
+// A stand-in for geo::Point, a type from a crate you don't own. Give it the
+// same name serde would see on the wire (or use #[ts(rename = "...")] to
+// decouple it), and every field of type `geo::Point` resolves to it.
+#[derive(Serialize, Ts)]
+pub struct Point {
+    pub lat: f64,
+    pub lng: f64,
+}
+
+#[derive(Serialize, Ts)]
+pub struct Place {
+    pub name: String,
+    pub location: geo::Point,
+}
+```
+
+No `build.rs` configuration needed — `Point` is just another scanned type.
+This generates:
+
+```ts
+// Place.ts
+import type { Point } from "./Point";
+
+export interface Place {
+  name: string;
+  location: Point;
+}
+```
+
+Matching is purely by name, which cuts both ways:
+
+- If `geo::Point` and your shadow struct's fields ever drift apart, nothing
+  catches it — this is exactly as trustworthy as the shadow struct is
+  accurate, same as `#[ts(type = "...")]`.
+- If a *real*, unrelated local type also happens to be named `Point`, that's
+  a genuine ambiguity — `#[derive(Ts)] pub struct Point` twice — and the
+  scanner already refuses to guess: it's the same "duplicate TypeScript name"
+  build error two of your own types get, naming both locations. Rename one
+  with `#[ts(rename = "...")]` to disambiguate.
+- Reserve this for a type that's structured and reused; for a single opaque
+  field, `#[ts(type = "...")]` inline is less machinery.
+
+## Example project
+
+[`fixtures/demo`](fixtures/demo) is a complete crate exercising most of the
+above: renamed and skipped fields, all four enum representations, generics,
+`transparent`, `readonly`, `inline`, per-variant `rename_all`, a `Preset`-backed
+foreign type (`uuid::Uuid`), and byte arrays. Its `build.rs` shows a real
+`Config`, and its committed `bindings/` directory shows the output. It also
+doubles as this crate's end-to-end test: `cargo test` in the workspace runs
+`cargo build` against it and, when `npx` is available, type-checks the result
+with `tsc --strict`.
+
 ## Not supported
 
 Const generics, trait objects, unions, and languages other than TypeScript.
@@ -242,4 +344,4 @@ Type aliases and unscanned foreign types need an explicit mapping.
 
 ## License
 
-MIT OR Apache-2.0
+MIT

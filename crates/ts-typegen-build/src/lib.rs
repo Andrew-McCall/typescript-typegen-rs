@@ -1,4 +1,22 @@
 //! Build-time TypeScript binding generation. Use from `build.rs`.
+//!
+//! ```no_run
+//! // build.rs
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     ts_typegen_build::Config::new()
+//!         .scan("src")
+//!         .output("bindings")
+//!         .run()
+//! }
+//! ```
+//!
+//! Mark the types you want bindings for with `#[derive(Serialize, Ts)]`
+//! (`Ts` comes from the `ts-typegen` crate). This crate reads that derive and
+//! any `#[ts(...)]` / `#[serde(...)]` attributes straight from source text
+//! with `syn` — a build script runs before its own crate compiles, so there
+//! is no compiled type information to inspect yet. See [`Config`] for every
+//! generation option, and [`Preset`] for built-in mappings of common foreign
+//! crates such as `uuid` and `chrono`.
 #![forbid(unsafe_code)]
 
 pub mod attrs;

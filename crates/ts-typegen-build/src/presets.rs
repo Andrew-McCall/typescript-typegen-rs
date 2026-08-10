@@ -3,15 +3,28 @@
 //! These are plain map entries rather than trait impls, so there is no orphan
 //! rule to work around and a later `map_type` call always wins.
 
+/// A built-in set of `map_type` entries for a foreign crate. Apply with
+/// [`Config::preset`](crate::config::Config::preset); a later `.map_type(..)`
+/// call always overrides whatever a preset installed.
+///
+/// Every mapping here targets `string`, matching how each type actually
+/// serialises through `serde_json` (RFC 3339 timestamps, hyphenated UUIDs,
+/// decimal text, ...) — never a structural guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
+    /// `uuid::Uuid` -> `string`.
     Uuid,
+    /// `chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Duration}` -> `string`.
     Chrono,
+    /// `time::{OffsetDateTime, PrimitiveDateTime, Date, Time}` -> `string`.
     Time,
+    /// `url::Url` -> `string`.
     Url,
+    /// `rust_decimal::Decimal` and `bigdecimal::BigDecimal` -> `string`.
     Decimal,
+    /// `bytes::Bytes` -> `string`.
     Bytes,
-    /// Every preset above.
+    /// Every preset above, unioned together.
     Common,
 }
 

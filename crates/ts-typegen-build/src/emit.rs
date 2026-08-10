@@ -198,16 +198,32 @@ fn emit_enum(decl: &Decl, cfg: &Config) -> String {
         return "never".to_string();
     };
 
+    // The compact single-line string union only works when no variant has a
+    // doc comment to put somewhere; a doc comment needs its own line.
     if let EnumRepr::UnitOnly = repr {
-        let arms: Vec<String> = variants.iter().map(|v| quoted(&v.ts_name)).collect();
-        return arms.join(" | ");
+        if variants.iter().all(|v| v.docs.is_empty()) {
+            let arms: Vec<String> = variants.iter().map(|v| quoted(&v.ts_name)).collect();
+            return arms.join(" | ");
+        }
     }
 
-    let arms: Vec<String> = variants.iter().map(|v| emit_variant(v, repr, cfg)).collect();
+    let arms: Vec<(String, String)> =
+        variants.iter().map(|v| (tsdoc(&v.docs, INDENT), emit_variant(v, repr, cfg))).collect();
     match arms.len() {
         0 => "never".to_string(),
-        1 => arms.into_iter().next().unwrap(),
-        _ => format!("\n{INDENT}| {}", arms.join(&format!("\n{INDENT}| "))),
+        // A lone arm sits directly after `=`, where a leading doc comment
+        // would collide with that formatting; the type's own doc, emitted by
+        // the caller, already covers a single-variant enum.
+        1 => arms.into_iter().next().unwrap().1,
+        _ => {
+            let mut out = String::new();
+            for (doc, arm) in &arms {
+                out.push('\n');
+                out.push_str(doc);
+                out.push_str(&format!("{INDENT}| {arm}"));
+            }
+            out
+        }
     }
 }
 
@@ -596,6 +612,37 @@ mod enum_tests {
             vec![variant("T", VariantKind::Tuple(vec![Ty::Prim(Prim::Bool), Ty::Prim(Prim::Str)]))],
         );
         assert_eq!(emit_decl(&d, &Config::new()), "export type X = { T: [boolean, string] };\n");
+    }
+
+    #[test]
+    fn variant_doc_comments_are_emitted_above_their_arm() {
+        let mut a = variant("A", VariantKind::Unit);
+        a.docs = vec!["Doc for A.".into()];
+        let d = enum_decl(EnumRepr::External, vec![a, variant("B", VariantKind::Unit)]);
+        assert_eq!(
+            emit_decl(&d, &Config::new()),
+            "export type X =\n  /**\n   * Doc for A.\n   */\n  | \"A\"\n  | \"B\";\n"
+        );
+    }
+
+    #[test]
+    fn all_unit_enum_with_a_doc_falls_back_to_the_multiline_form() {
+        let mut active = variant("Active", VariantKind::Unit);
+        active.docs = vec!["Can log in.".into()];
+        let d = enum_decl(EnumRepr::UnitOnly, vec![active, variant("Banned", VariantKind::Unit)]);
+        let out = emit_decl(&d, &Config::new());
+        assert!(out.contains("/**\n   * Can log in.\n   */\n  | \"Active\""), "{out}");
+        assert!(out.contains("| \"Banned\""), "{out}");
+    }
+
+    #[test]
+    fn a_single_variant_enum_drops_its_variant_doc_without_corrupting_formatting() {
+        // A lone arm has nowhere clean to put its own doc comment; the type's
+        // own doc, from #[derive(Ts)] on the enum itself, covers this case.
+        let mut only = variant("Only", VariantKind::Unit);
+        only.docs = vec!["Ignored here.".into()];
+        let d = enum_decl(EnumRepr::External, vec![only]);
+        assert_eq!(emit_decl(&d, &Config::new()), "export type X = \"Only\";\n");
     }
 }
 

@@ -2,8 +2,11 @@
 export type { AuditEntry } from "./AuditEntry";
 export type { Command } from "./Command";
 export type { Event } from "./Event";
+export type { Id } from "./Id";
 export type { Meters } from "./Meters";
+export type { Notification } from "./Notification";
 export type { Page } from "./Page";
 export type { Role } from "./Role";
 export type { Span } from "./Span";
+export type { Ticket } from "./Ticket";
 export type { User } from "./User";

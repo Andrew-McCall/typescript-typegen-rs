@@ -121,3 +121,32 @@ fn result_wire_shape_is_not_transparent() {
         json!({ "v": { "Err": "e" } })
     );
 }
+
+#[derive(Serialize)]
+struct WireNonZero {
+    v: std::num::NonZeroU32,
+}
+
+#[derive(Serialize)]
+struct WireMapKey {
+    by_id: std::collections::HashMap<i32, String>,
+}
+
+#[test]
+fn map_key_wire_shape_is_always_a_string() {
+    // TS: Record<string, string> -- justifies lower.rs forcing the key to
+    // string regardless of the Rust key type; serde_json stringifies it.
+    let mut by_id = std::collections::HashMap::new();
+    by_id.insert(7, "seven".to_string());
+    let v = serde_json::to_value(WireMapKey { by_id }).unwrap();
+    let obj = v.get("by_id").unwrap().as_object().unwrap();
+    assert!(obj.contains_key("7"), "expected the string key \"7\", got: {v}");
+}
+
+#[test]
+fn nonzero_wire_shape_is_a_plain_number() {
+    // TS: v: number -- justifies lower.rs mapping NonZero* to the same width as
+    // its plain counterpart rather than to some branded/object shape.
+    let v = WireNonZero { v: std::num::NonZeroU32::new(7).unwrap() };
+    assert_eq!(serde_json::to_value(v).unwrap(), json!({ "v": 7 }));
+}

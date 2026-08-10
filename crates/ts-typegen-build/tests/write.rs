@@ -114,6 +114,32 @@ fn check_mode_reports_drift_without_writing() {
 }
 
 #[test]
+fn check_mode_reports_an_orphaned_file_as_drift() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config::new().output(dir.path());
+    write_all(
+        &files(&[
+            ("A.ts", &generated("export type A = null;\n")),
+            ("B.ts", &generated("export type B = null;\n")),
+        ]),
+        &cfg,
+    )
+    .unwrap();
+
+    // The current generation set no longer includes B -- its Rust type is
+    // gone, so an ordinary run would sweep B.ts. Check mode must report that
+    // as drift too, not just content mismatches on files it still expects.
+    let check = Config::new().output(dir.path()).check(true);
+    let err = write_all(&files(&[("A.ts", &generated("export type A = null;\n"))]), &check)
+        .expect_err("an orphaned generated file must count as drift");
+    let msg = format!("{err}");
+    assert!(msg.contains("B.ts"), "{msg}");
+    assert!(msg.contains("no matching Rust type"), "{msg}");
+    // Disk is untouched: check mode never deletes.
+    assert!(dir.path().join("B.ts").is_file());
+}
+
+#[test]
 fn check_mode_passes_when_output_matches() {
     let dir = tempfile::tempdir().unwrap();
     let f = files(&[("A.ts", &generated("export type A = null;\n"))]);
