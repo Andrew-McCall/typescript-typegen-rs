@@ -191,6 +191,37 @@ fn opaque_values_are_unknown_by_default_and_any_on_request() {
 }
 
 #[test]
+fn a_preset_resolves_a_foreign_type_end_to_end() {
+    use ts_typegen_build::Preset;
+    let (dir, cfg) = build("#[derive(Ts)] pub struct S { pub id: uuid::Uuid, pub at: chrono::DateTime }");
+    generate(&cfg.preset(Preset::Common)).unwrap();
+    let s = fs::read_to_string(dir.path().join("bindings/S.ts")).unwrap();
+    assert!(s.contains("id: string;"), "{s}");
+    assert!(s.contains("at: string;"), "{s}");
+    // Presets install a plain map_type entry; nothing about a foreign path
+    // should produce an import.
+    assert!(!s.contains("import"), "{s}");
+}
+
+#[test]
+fn map_keys_render_as_string_regardless_of_the_rust_key_type() {
+    let s = emit(
+        "#[derive(Ts)] pub struct S { pub by_id: std::collections::HashMap<i32, String> }",
+    );
+    assert!(s.contains("by_id: Record<string, string>;"), "{s}");
+}
+
+#[test]
+fn nonzero_integers_render_at_the_same_width_as_their_plain_counterpart() {
+    let s = emit(
+        "#[derive(Ts)] pub struct S { pub a: std::num::NonZeroU8, \
+         pub b: std::num::NonZeroI64 }",
+    );
+    assert!(s.contains("a: number;"), "{s}");
+    assert!(s.contains("b: number;"), "{s}");
+}
+
+#[test]
 fn a_configured_header_follows_the_marker_in_every_file() {
     let (dir, cfg) = build("#[derive(Ts)] pub struct S { pub v: u8 }");
     generate(&cfg.header("/* eslint-disable */")).unwrap();

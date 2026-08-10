@@ -415,6 +415,55 @@ mod inline_tests {
     }
 
     #[test]
+    fn inlining_a_newtype_target_splices_its_inner_type() {
+        // body_as_ty's Newtype arm, never exercised by the Struct-only test above.
+        let reg = registry(vec![
+            decl(
+                "A",
+                Body::Struct(vec![field("m", Ty::Ref { name: "Meters".into(), args: vec![] }, true)]),
+            ),
+            decl("Meters", Body::Newtype(Ty::Prim(Prim::Int { bits: 32, signed: false }))),
+        ]);
+        let (files, diags) = render(&reg);
+        assert!(diags.is_empty(), "{diags:?}");
+        let a = &files["A.ts"];
+        assert!(!a.contains("import"), "{a}");
+        assert!(a.contains("m: number;"), "newtype shape not spliced: {a}");
+    }
+
+    #[test]
+    fn inlining_a_tuple_target_splices_its_element_types() {
+        // body_as_ty's Tuple arm.
+        let reg = registry(vec![
+            decl(
+                "A",
+                Body::Struct(vec![field("p", Ty::Ref { name: "Pair".into(), args: vec![] }, true)]),
+            ),
+            decl("Pair", Body::Tuple(vec![Ty::Prim(Prim::Bool), Ty::Prim(Prim::Str)])),
+        ]);
+        let (files, diags) = render(&reg);
+        assert!(diags.is_empty(), "{diags:?}");
+        let a = &files["A.ts"];
+        assert!(!a.contains("import"), "{a}");
+        assert!(a.contains("p: [boolean, string];"), "tuple shape not spliced: {a}");
+    }
+
+    #[test]
+    fn inlining_a_unit_target_splices_null() {
+        // body_as_ty's Unit arm.
+        let reg = registry(vec![
+            decl(
+                "A",
+                Body::Struct(vec![field("u", Ty::Ref { name: "Marker".into(), args: vec![] }, true)]),
+            ),
+            decl("Marker", Body::Unit),
+        ]);
+        let (files, diags) = render(&reg);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(files["A.ts"].contains("u: null;"), "{}", files["A.ts"]);
+    }
+
+    #[test]
     fn a_non_inlined_reference_still_imports() {
         let reg = registry(vec![
             decl(

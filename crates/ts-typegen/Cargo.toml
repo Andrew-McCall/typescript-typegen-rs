@@ -1,11 +1,20 @@
 [package]
 name = "ts-typegen"
-description = "Generate TypeScript types from Rust structs and enums at build time"
+description = "Generate TypeScript types and interfaces from Rust structs and enums at build time, matching what serde puts on the wire"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["typescript", "codegen", "serde", "bindings", "json"]
+categories = [
+    "development-tools::build-utils",
+    "development-tools::ffi",
+    "web-programming",
+    "encoding",
+]
 
 [dependencies]
 ts-typegen-macros.workspace = true
@@ -16,3 +25,4 @@ strict = ["ts-typegen-macros/strict"]
 
 [dev-dependencies]
 trybuild = "1.0.119"
+serde = { version = "1", features = ["derive"] }
