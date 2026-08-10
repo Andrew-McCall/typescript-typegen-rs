@@ -4,7 +4,7 @@ exclude = ["fixtures/demo"]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -12,7 +12,7 @@ repository = "https://github.com/Andrew-McCall/typescript-typegen-rs"
 homepage = "https://github.com/Andrew-McCall/typescript-typegen-rs"
 
 [workspace.dependencies]
-ts-typegen-macros = { version = "1.0.0", path = "crates/ts-typegen-macros" }
+ts-typegen-macros = { version = "1.0.1", path = "crates/ts-typegen-macros" }
 syn = { version = "3", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
