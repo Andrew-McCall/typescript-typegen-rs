@@ -68,18 +68,75 @@ pub enum Ty {
     },
     /// A generic type parameter of the enclosing declaration.
     Param(String),
-    /// Verbatim TypeScript from `#[ts(type = "...")]` or a config type mapping.
+    /// Verbatim TypeScript from `#[ts(type = "...")]` or a config type mapping,
+    /// unimported and unchecked.
     Raw {
-        /// The TS text to emit, unimported and unchecked.
-        name: String,
-        /// Generic arguments carried over from the source Rust type, e.g. the
-        /// `T` in a `.map_type("some::Wrapper", "Wrapper")` match against
-        /// `Wrapper<T>`. Rendered as `name<arg0, arg1, ...>` when non-empty.
+        /// The TS text to emit, e.g. `"string"` or `"TsWrapper<{0}>"`. May
+        /// contain `{0}`, `{1}`, ... placeholders; see [`placeholder_positions`].
+        template: String,
+        /// Generic arguments from the source Rust type, substituted into
+        /// `template`'s placeholders at render time. Empty when `template` has
+        /// no placeholder -- a `.map_type` match that doesn't reference its
+        /// argument drops it, it never reaches an import or an "unknown type"
+        /// diagnostic.
         args: Vec<Ty>,
     },
     /// An opaque value with no known shape, e.g. `serde_json::Value`. Renders
     /// as `unknown` or `any` depending on [`crate::config::Config::unknown_type`].
     Unknown,
+}
+
+/// Finds every `{N}` placeholder in a [`Ty::Raw`] template, as
+/// `(start_byte, end_byte_exclusive, N)` triples in left-to-right order.
+///
+/// A `{` not followed by ASCII digits and a `}` is left alone as literal
+/// text rather than treated as a malformed placeholder -- a template is
+/// free to contain a brace for other reasons.
+pub fn placeholder_positions(template: &str) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::new();
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(rel_end) = template[i + 1..].find('}') {
+                let digits = &template[i + 1..i + 1 + rel_end];
+                if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                    if let Ok(idx) = digits.parse::<usize>() {
+                        out.push((i, i + 2 + rel_end, idx));
+                    }
+                    i += 2 + rel_end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::placeholder_positions;
+
+    #[test]
+    fn finds_placeholders_in_order() {
+        assert_eq!(placeholder_positions("{0}"), vec![(0, 3, 0)]);
+        assert_eq!(placeholder_positions("{0} | {1}"), vec![(0, 3, 0), (6, 9, 1)]);
+        assert_eq!(placeholder_positions("TsWrapper<{0}>"), vec![(10, 13, 0)]);
+    }
+
+    #[test]
+    fn a_template_with_no_placeholder_finds_nothing() {
+        assert!(placeholder_positions("string").is_empty());
+        assert!(placeholder_positions("Foo<Bar>").is_empty());
+    }
+
+    #[test]
+    fn braces_without_digits_are_literal_text_not_a_placeholder() {
+        assert!(placeholder_positions("{}").is_empty());
+        assert!(placeholder_positions("{abc}").is_empty());
+        assert!(placeholder_positions("{").is_empty());
+    }
 }
 
 /// A struct field or enum struct-variant field, lowered to its TypeScript shape.

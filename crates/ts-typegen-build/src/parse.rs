@@ -129,11 +129,37 @@ fn unraw(ident: &syn::Ident) -> String {
     s.strip_prefix("r#").map(str::to_owned).unwrap_or(s)
 }
 
-fn loc_of(file: &Path, span: proc_macro2::Span) -> SourceLoc {
+pub(crate) fn loc_of(file: &Path, span: proc_macro2::Span) -> SourceLoc {
     SourceLoc {
         file: file.to_path_buf(),
         line: span.start().line,
     }
+}
+
+/// Extracts a declaration's (struct, enum, or type alias) own type-parameter
+/// names, in declaration order, diagnosing any const generic along the way --
+/// neither this crate nor a type alias resolving over it can evaluate one.
+pub(crate) fn type_param_names(
+    generics: &syn::Generics,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<String> {
+    for p in &generics.params {
+        if let syn::GenericParam::Const(c) = p {
+            diags.push(
+                Diagnostic::new(loc.clone(), format!("const generic `{}` is not supported", c.ident))
+                    .with_help("const generics cannot be resolved without type evaluation"),
+            );
+        }
+    }
+    generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Parses one `#[derive(Ts)]`-carrying struct or enum into a [`Decl`],
@@ -154,34 +180,10 @@ pub fn parse_item(
     }
 
     let mut ctx = base.clone();
-    for p in &item.generics.params {
-        match p {
-            syn::GenericParam::Type(t) => {
-                ctx.params.insert(t.ident.to_string());
-            }
-            syn::GenericParam::Const(c) => {
-                diags.push(
-                    Diagnostic::new(
-                        loc.clone(),
-                        format!("const generic `{}` is not supported", c.ident),
-                    )
-                    .with_help("const generics cannot be resolved without type evaluation"),
-                );
-            }
-            syn::GenericParam::Lifetime(_) => {}
-        }
-    }
     // Declaration order, not the HashSet's iteration order, drives the emitted
     // generic list — `Page<K, V>` must not come out as `Page<V, K>`.
-    let generics: Vec<String> = item
-        .generics
-        .params
-        .iter()
-        .filter_map(|p| match p {
-            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
-            _ => None,
-        })
-        .collect();
+    let generics = type_param_names(&item.generics, &loc, diags);
+    ctx.params.extend(generics.iter().cloned());
 
     let ts_name = attrs
         .rename
@@ -190,7 +192,7 @@ pub fn parse_item(
     check_custom_serialisation(item, file, diags);
 
     let body = match &item.data {
-        syn::Data::Struct(s) => struct_body(s, &attrs, &ctx, &loc, diags),
+        syn::Data::Struct(s) => struct_body(s, &attrs, &ctx, &loc, file, diags),
         syn::Data::Enum(e) => enum_body(e, &attrs, &ctx, file, diags),
         syn::Data::Union(_) => {
             diags.push(Diagnostic::new(loc.clone(), "unions are not supported"));
@@ -215,12 +217,13 @@ fn transparent_body(
     attrs: &Attrs,
     ctx: &LowerCtx,
     loc: &SourceLoc,
+    file: &Path,
     diags: &mut Diagnostics,
 ) -> Body {
     let kept: Vec<&syn::Field> =
         s.fields.iter().filter(|f| !parse_attrs(&f.attrs).skip).collect();
     match kept.as_slice() {
-        [f] => Body::Newtype(field_ty(f, &parse_attrs(&f.attrs), ctx)),
+        [f] => Body::Newtype(field_ty(f, &parse_attrs(&f.attrs), ctx, file, diags)),
         _ => {
             diags.push(
                 Diagnostic::new(
@@ -235,9 +238,9 @@ fn transparent_body(
             // Fall back to the ordinary shape rather than inventing one.
             match &s.fields {
                 syn::Fields::Named(n) => {
-                    Body::Struct(named_fields(n, attrs.rename_all, ctx, attrs.readonly))
+                    Body::Struct(named_fields(n, attrs.rename_all, ctx, attrs.readonly, file, diags))
                 }
-                syn::Fields::Unnamed(u) => Body::Tuple(unnamed_types(u, ctx)),
+                syn::Fields::Unnamed(u) => Body::Tuple(unnamed_types(u, ctx, file, diags)),
                 syn::Fields::Unit => Body::Unit,
             }
         }
@@ -271,10 +274,10 @@ fn check_custom_serialisation(item: &syn::DeriveInput, file: &Path, diags: &mut 
     }
 }
 
-fn field_ty(f: &syn::Field, fa: &Attrs, ctx: &LowerCtx) -> Ty {
+fn field_ty(f: &syn::Field, fa: &Attrs, ctx: &LowerCtx, file: &Path, diags: &mut Diagnostics) -> Ty {
     match &fa.ts_type {
-        Some(raw) => Ty::Raw { name: raw.clone(), args: vec![] },
-        None => lower_type(&f.ty, ctx),
+        Some(raw) => Ty::Raw { template: raw.clone(), args: vec![] },
+        None => lower_type(&f.ty, ctx, &loc_of(file, f.ty.span()), diags),
     }
 }
 
@@ -283,6 +286,8 @@ fn named_fields(
     rule: Option<RenameRule>,
     ctx: &LowerCtx,
     inherited_readonly: bool,
+    file: &Path,
+    diags: &mut Diagnostics,
 ) -> Vec<Field> {
     fields
         .named
@@ -300,7 +305,7 @@ fn named_fields(
             Some(Field {
                 rust_name,
                 ts_name,
-                ty: field_ty(f, &fa, ctx),
+                ty: field_ty(f, &fa, ctx, file, diags),
                 optional: fa.optional,
                 flatten: fa.flatten,
                 readonly: fa.readonly || inherited_readonly,
@@ -311,7 +316,12 @@ fn named_fields(
         .collect()
 }
 
-fn unnamed_types(fields: &syn::FieldsUnnamed, ctx: &LowerCtx) -> Vec<Ty> {
+fn unnamed_types(
+    fields: &syn::FieldsUnnamed,
+    ctx: &LowerCtx,
+    file: &Path,
+    diags: &mut Diagnostics,
+) -> Vec<Ty> {
     fields
         .unnamed
         .iter()
@@ -320,7 +330,7 @@ fn unnamed_types(fields: &syn::FieldsUnnamed, ctx: &LowerCtx) -> Vec<Ty> {
             if fa.skip {
                 return None;
             }
-            Some(field_ty(f, &fa, ctx))
+            Some(field_ty(f, &fa, ctx, file, diags))
         })
         .collect()
 }
@@ -330,18 +340,19 @@ fn struct_body(
     attrs: &Attrs,
     ctx: &LowerCtx,
     loc: &SourceLoc,
+    file: &Path,
     diags: &mut Diagnostics,
 ) -> Body {
     if attrs.transparent {
-        return transparent_body(s, attrs, ctx, loc, diags);
+        return transparent_body(s, attrs, ctx, loc, file, diags);
     }
     match &s.fields {
         syn::Fields::Named(n) => {
-            let fields = named_fields(n, attrs.rename_all, ctx, attrs.readonly);
+            let fields = named_fields(n, attrs.rename_all, ctx, attrs.readonly, file, diags);
             Body::Struct(merge_field_collisions(fields, loc, diags))
         }
         syn::Fields::Unnamed(u) => {
-            let mut tys = unnamed_types(u, ctx);
+            let mut tys = unnamed_types(u, ctx, file, diags);
             if tys.len() == 1 {
                 Body::Newtype(tys.remove(0))
             } else {
@@ -377,12 +388,12 @@ fn enum_body(
                 syn::Fields::Named(n) => {
                     // A variant-level rename_all overrides the container default.
                     let rule = va.rename_all.or(attrs.rename_all_fields);
-                    let fields = named_fields(n, rule, ctx, attrs.readonly);
+                    let fields = named_fields(n, rule, ctx, attrs.readonly, file, diags);
                     let loc = loc_of(file, v.ident.span());
                     VariantKind::Struct(merge_field_collisions(fields, &loc, diags))
                 }
                 syn::Fields::Unnamed(u) => {
-                    let mut tys = unnamed_types(u, ctx);
+                    let mut tys = unnamed_types(u, ctx, file, diags);
                     if tys.len() == 1 {
                         VariantKind::Newtype(tys.remove(0))
                     } else {
@@ -514,7 +525,7 @@ mod tests {
     fn ts_type_short_circuits_lowering() {
         let d = ok("#[derive(Ts)] struct S { #[ts(type = \"string\")] v: Whatever }");
         let Body::Struct(f) = d.body else { panic!() };
-        assert_eq!(f[0].ty, Ty::Raw { name: "string".into(), args: vec![] });
+        assert_eq!(f[0].ty, Ty::Raw { template: "string".into(), args: vec![] });
     }
 
     #[test]
@@ -670,7 +681,7 @@ mod attribute_behaviour_tests {
     fn custom_serialisation_with_a_ts_type_override_is_accepted() {
         let d = ok("#[derive(Ts)] struct S { #[serde(with = \"m\")] #[ts(type = \"string\")] v: u32 }");
         let Body::Struct(f) = d.body else { panic!() };
-        assert_eq!(f[0].ty, Ty::Raw { name: "string".into(), args: vec![] });
+        assert_eq!(f[0].ty, Ty::Raw { template: "string".into(), args: vec![] });
     }
 
     #[test]

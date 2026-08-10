@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::config::Config;
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::emit::emit_decl;
-use crate::ir::{Body, Decl, Registry, SourceLoc, Ty, VariantKind};
+use crate::ir::{Body, Decl, Registry, SourceLoc, Ty, VariantKind, placeholder_positions};
 
 /// Leading line written to every generated file. [`crate::write`] treats any
 /// `.ts` file starting with this line as safe to overwrite or delete; a file
@@ -224,10 +224,18 @@ fn collect_ty_refs(ty: &Ty, out: &mut BTreeSet<String>) {
             collect_ty_refs(value, out);
         }
         Ty::Object(fields) => fields.iter().for_each(|f| collect_ty_refs(&f.ty, out)),
-        // The raw name itself is verbatim text, never imported, but its
-        // generic arguments (from a `map_type` match against a generic Rust
-        // type) may still reference real declarations.
-        Ty::Raw { args, .. } => args.iter().for_each(|a| collect_ty_refs(a, out)),
+        // The template text itself is verbatim, never imported. Only the
+        // arguments its placeholders actually substitute can reference a real
+        // declaration -- an argument a terminal mapping drops (no `{0}` in the
+        // template) must never demand an import or trip "unknown type", even
+        // if it's still sitting in `args`.
+        Ty::Raw { template, args } => {
+            for (_, _, idx) in placeholder_positions(template) {
+                if let Some(a) = args.get(idx) {
+                    collect_ty_refs(a, out);
+                }
+            }
+        }
         Ty::Prim(_) | Ty::Param(_) | Ty::Unknown => {}
     }
 }

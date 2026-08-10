@@ -138,12 +138,64 @@ side already serializes those fields as strings.
 
 ### Generic foreign types
 
-`.map_type` forwards generic arguments instead of discarding them: matching
-`mycrate::Wrapper<T>` against `.map_type("mycrate::Wrapper", "TsWrapper")`
-renders `TsWrapper<T>`, with `T` lowered like anywhere else — a primitive, a
-scanned type (which still gets imported), or a param of the enclosing
-declaration. Write the target name bare, without its own `<...>`; the
-argument list is appended for you.
+A `map_type` target can carry a matched type's generic arguments through with
+`{0}`, `{1}`, ... placeholders:
+
+```rust
+.map_type("mycrate::Wrapper", "TsWrapper<{0}>")  // constructor: Wrapper<T> -> TsWrapper<T>
+.map_type("chrono::DateTime", "string")           // terminal: the argument is dropped
+.map_type("dto::Patch", "{0} | null")             // shaped alias: no wrapper name at all
+```
+
+A placeholder is substituted with its argument lowered like anywhere else — a
+primitive, a scanned type (which still gets imported), or a param of the
+enclosing declaration. A target with **no** placeholder drops the argument
+entirely and unconditionally, before it can reach an import or an "unknown
+type" diagnostic: `chrono::DateTime<Utc>` mapped to `"string"` never needs
+`Utc` to resolve as anything. This is what makes every built-in
+[preset](#presets) safe to use with the generic arguments their real types
+always carry.
+
+Mapping a generic type to a target with no placeholder and no arguments at
+the use site is silent — nothing was dropped. But mapping one *with* an
+argument at the use site to a target that isn't a bare TS keyword
+(`string`, `number`, `boolean`, `unknown`, `any`, `never`, `null`) and doesn't
+already spell out its own `<...>` is usually a forgotten `{0}`, so it warns:
+
+```
+warning: ts-typegen: src/user.rs:12 map_type target `TsWrapper` for `Wrapper`
+  has no `{0}` placeholder, but `Wrapper` was used here with 1 generic argument
+  help: add `{0}` to the mapping to forward it, e.g.
+        .map_type("...::Wrapper", "TsWrapper<{0}>") -- or ignore this if
+        dropping it is intentional, the way string-valued presets do
+```
+
+### Type aliases
+
+`pub type Timestamp = chrono::DateTime<chrono::Utc>;` resolves on its own —
+the scanner already parses the file it's declared in, so a plain alias needs
+no `build.rs` entry at all. A field typed `Timestamp` lowers exactly as if it
+had been written out in full, terminal `map_type` mappings included:
+
+```rust
+pub type Timestamp = chrono::DateTime<chrono::Utc>;
+
+#[derive(Serialize, Ts)]
+pub struct Event {
+    pub at: Timestamp,
+}
+```
+
+```ts
+export interface Event {
+  at: string;
+}
+```
+
+Generic aliases work too — `pub type Boxed<T> = Vec<T>;` instantiates `T` at
+each use site, the same substitution a scanned generic struct gets. An alias
+can reference another alias declared anywhere in the scan, in either order;
+a cycle (`type A = B; type B = A;`) is a build error naming both, not a hang.
 
 ## Attributes
 
@@ -284,6 +336,8 @@ Writing into your source tree from a build script is unusual, so:
 fine for an opaque scalar (a timestamp, a decimal) but doesn't scale to a
 *structured* foreign type used in several places: every field pays the string
 again, and nothing catches them drifting out of sync when the shape changes.
+(For a scalar behind your *own* alias rather than a bare foreign path, a
+[type alias](#type-aliases) is usually less machinery than either.)
 
 Reference resolution is by name against the registry, not by where a
 declaration came from (`render.rs` matches a field's `Ty::Ref` against

@@ -77,12 +77,136 @@ fn map_type_forwards_generic_arguments_and_imports_what_they_reference() {
     let cfg = Config::new()
         .scan(dir.path().join("src"))
         .output(dir.path().join("bindings"))
-        .map_type("mycrate::Wrapper", "TsWrapper")
+        .map_type("mycrate::Wrapper", "TsWrapper<{0}>")
         .always_run(true);
-    generate(&cfg).unwrap();
+    let outcome = generate(&cfg).unwrap();
+    assert!(outcome.warnings.is_empty(), "a used placeholder needs no warning: {:?}", outcome.warnings);
     let s = fs::read_to_string(dir.path().join("bindings/S.ts")).unwrap();
     assert!(s.contains("w: TsWrapper<Inner>;"), "{s}");
     assert!(s.contains("import type { Inner } from \"./Inner\";"), "{s}");
+}
+
+#[test]
+fn map_type_with_no_placeholder_drops_the_argument_and_never_imports_it() {
+    // The regression this guards: a terminal mapping like a preset's must not
+    // demand its dropped argument resolve as an importable type.
+    let dir = project(&[(
+        "src/lib.rs",
+        "#[derive(Ts)] pub struct S { pub at: chrono::DateTime<chrono::Utc> }\n",
+    )]);
+    let cfg = Config::new()
+        .scan(dir.path().join("src"))
+        .output(dir.path().join("bindings"))
+        .map_type("chrono::DateTime", "string")
+        .always_run(true);
+    let outcome = generate(&cfg).expect("Utc must not need to resolve as a type");
+    assert!(outcome.warnings.is_empty(), "a bare TS keyword target is a deliberate terminal: {:?}", outcome.warnings);
+    let s = fs::read_to_string(dir.path().join("bindings/S.ts")).unwrap();
+    assert!(s.contains("at: string;"), "{s}");
+    assert!(!s.contains("import"), "{s}");
+}
+
+#[test]
+fn a_shaped_alias_places_the_argument_inside_the_template() {
+    let dir = project(&[(
+        "src/lib.rs",
+        "#[derive(Ts)] pub struct S { pub v: dto::Patch<String> }\n",
+    )]);
+    let cfg = Config::new()
+        .scan(dir.path().join("src"))
+        .output(dir.path().join("bindings"))
+        .map_type("dto::Patch", "{0} | null")
+        .always_run(true);
+    generate(&cfg).unwrap();
+    let s = fs::read_to_string(dir.path().join("bindings/S.ts")).unwrap();
+    assert!(s.contains("v: string | null;"), "{s}");
+}
+
+#[test]
+fn a_terminal_with_no_placeholder_and_no_keyword_target_warns() {
+    let dir = project(&[(
+        "src/lib.rs",
+        "#[derive(Ts)] pub struct S { pub w: mycrate::Wrapper<String> }\n",
+    )]);
+    let cfg = Config::new()
+        .scan(dir.path().join("src"))
+        .output(dir.path().join("bindings"))
+        .map_type("mycrate::Wrapper", "TsWrapper")
+        .always_run(true);
+    let outcome = generate(&cfg).unwrap();
+    assert_eq!(outcome.warnings.len(), 1, "{:?}", outcome.warnings);
+    assert!(outcome.warnings[0].contains("TsWrapper"), "{}", outcome.warnings[0]);
+    let s = fs::read_to_string(dir.path().join("bindings/S.ts")).unwrap();
+    assert!(s.contains("w: TsWrapper;"), "the argument is still dropped: {s}");
+}
+
+#[test]
+fn a_type_alias_resolves_without_any_map_type_entry() {
+    let dir = project(&[(
+        "src/lib.rs",
+        "pub type Meters = f64;\n\
+         #[derive(Ts)] pub struct S { pub d: Meters }\n",
+    )]);
+    let cfg = Config::new()
+        .scan(dir.path().join("src"))
+        .output(dir.path().join("bindings"))
+        .always_run(true);
+    let outcome = generate(&cfg).expect("a plain type alias needs no configuration");
+    assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    let s = fs::read_to_string(dir.path().join("bindings/S.ts")).unwrap();
+    assert!(s.contains("d: number;"), "{s}");
+}
+
+#[test]
+fn a_type_alias_over_a_map_typed_foreign_generic_needs_no_import() {
+    // The motivating case: `type Timestamp = chrono::DateTime<chrono::Utc>;`
+    // must resolve entirely through the alias + terminal map_type, with no
+    // "unknown type `Utc`" and no import.
+    let dir = project(&[(
+        "src/lib.rs",
+        "pub type Timestamp = chrono::DateTime<chrono::Utc>;\n\
+         #[derive(Ts)] pub struct S { pub at: Timestamp }\n",
+    )]);
+    let cfg = Config::new()
+        .scan(dir.path().join("src"))
+        .output(dir.path().join("bindings"))
+        .map_type("chrono::DateTime", "string")
+        .always_run(true);
+    let outcome = generate(&cfg).expect("the alias must resolve through the terminal mapping");
+    assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    let s = fs::read_to_string(dir.path().join("bindings/S.ts")).unwrap();
+    assert!(s.contains("at: string;"), "{s}");
+    assert!(!s.contains("import"), "{s}");
+}
+
+#[test]
+fn a_generic_type_alias_substitutes_its_own_parameter() {
+    let dir = project(&[(
+        "src/lib.rs",
+        "pub type Boxed<T> = Vec<T>;\n\
+         #[derive(Ts)] pub struct S { pub items: Boxed<bool> }\n",
+    )]);
+    let cfg = Config::new()
+        .scan(dir.path().join("src"))
+        .output(dir.path().join("bindings"))
+        .always_run(true);
+    generate(&cfg).unwrap();
+    let s = fs::read_to_string(dir.path().join("bindings/S.ts")).unwrap();
+    assert!(s.contains("items: boolean[];"), "{s}");
+}
+
+#[test]
+fn a_cyclic_type_alias_is_a_diagnostic_not_a_hang() {
+    let dir = project(&[(
+        "src/lib.rs",
+        "pub type A = B;\npub type B = A;\n#[derive(Ts)] pub struct S { pub v: A }\n",
+    )]);
+    let cfg = Config::new()
+        .scan(dir.path().join("src"))
+        .output(dir.path().join("bindings"))
+        .always_run(true);
+    let err = generate(&cfg).expect_err("a cyclic alias cannot resolve to a real shape");
+    assert!(format!("{err}").contains("defined in terms of itself"));
 }
 
 #[test]

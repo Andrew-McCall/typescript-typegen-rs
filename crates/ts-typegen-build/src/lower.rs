@@ -4,8 +4,10 @@
 //! recorded as-is; choosing `number` vs `bigint` is the emitter's job.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
-use crate::ir::{Field, Prim, Ty};
+use crate::diag::{Diagnostic, Diagnostics};
+use crate::ir::{Field, Prim, SourceLoc, Ty, placeholder_positions};
 
 /// Maps Rust type paths to verbatim TypeScript. Lookup is by final path
 /// segment, matching the reference-resolution rule in the spec.
@@ -25,14 +27,53 @@ impl TypeMap {
     }
 }
 
+/// A `pub type Name<P...> = Target;` collected while scanning, not yet
+/// lowered -- an alias may be declared in a file visited after its first use,
+/// so every alias is collected before any of them are resolved.
+#[derive(Debug, Clone)]
+pub struct RawAlias {
+    /// The alias's own generic type parameters, in declaration order.
+    pub params: Vec<String>,
+    /// The unlowered right-hand side.
+    pub target: syn::Type,
+    /// Where the alias was declared.
+    pub loc: SourceLoc,
+}
+
+/// A [`RawAlias`] after its target has been lowered, with [`Ty::Param`]
+/// standing in for each of the alias's own parameters wherever they appear.
+#[derive(Debug, Clone)]
+pub struct ResolvedAlias {
+    /// The alias's own generic type parameters, in declaration order.
+    pub params: Vec<String>,
+    /// The lowered target, containing `Ty::Param(p)` for each `p` in `params`.
+    pub ty: Ty,
+}
+
+/// Type aliases discovered while scanning, resolved once up front so a field
+/// can reference `type Timestamp = chrono::DateTime<chrono::Utc>;` without a
+/// `.map_type` entry of its own. Cheap to clone: shared via `Rc`, since a copy
+/// rides along in every declaration's [`LowerCtx`].
+#[derive(Debug, Clone, Default)]
+pub struct AliasTable(Rc<HashMap<String, ResolvedAlias>>);
+
+impl AliasTable {
+    /// Looks up an alias by its own (unqualified) name.
+    pub fn get(&self, name: &str) -> Option<&ResolvedAlias> {
+        self.0.get(name)
+    }
+}
+
 /// Context threaded through [`lower_type`]: the enclosing declaration's
-/// generic parameters and the configured type overrides.
+/// generic parameters, the configured type overrides, and resolved aliases.
 #[derive(Debug, Default, Clone)]
 pub struct LowerCtx {
     /// Type parameters of the enclosing declaration.
     pub params: HashSet<String>,
     /// Configured type overrides, checked before any built-in mapping.
     pub map: TypeMap,
+    /// Type aliases collected while scanning, checked after built-in forms.
+    pub aliases: AliasTable,
 }
 
 /// Wrappers that vanish on the wire.
@@ -50,33 +91,43 @@ const ARRAYS: &[&str] = &[
 const MAPS: &[&str] = &["HashMap", "BTreeMap", "IndexMap"];
 
 /// Lowers a parsed Rust type to its IR [`Ty`], per the wire shape
-/// `serde_json` actually produces — not a structural translation.
-pub fn lower_type(ty: &syn::Type, ctx: &LowerCtx) -> Ty {
+/// `serde_json` actually produces — not a structural translation. `loc` is
+/// where the type was written, for diagnostics raised while lowering it.
+pub fn lower_type(ty: &syn::Type, ctx: &LowerCtx, loc: &SourceLoc, diags: &mut Diagnostics) -> Ty {
     match ty {
-        syn::Type::Reference(r) => lower_type(&r.elem, ctx),
-        syn::Type::Paren(p) => lower_type(&p.elem, ctx),
-        syn::Type::Group(g) => lower_type(&g.elem, ctx),
-        syn::Type::Slice(s) => Ty::Array(Box::new(lower_type(&s.elem, ctx))),
-        syn::Type::Array(a) => Ty::Array(Box::new(lower_type(&a.elem, ctx))),
+        syn::Type::Reference(r) => lower_type(&r.elem, ctx, loc, diags),
+        syn::Type::Paren(p) => lower_type(&p.elem, ctx, loc, diags),
+        syn::Type::Group(g) => lower_type(&g.elem, ctx, loc, diags),
+        syn::Type::Slice(s) => Ty::Array(Box::new(lower_type(&s.elem, ctx, loc, diags))),
+        syn::Type::Array(a) => Ty::Array(Box::new(lower_type(&a.elem, ctx, loc, diags))),
         syn::Type::Tuple(t) if t.elems.is_empty() => Ty::Prim(Prim::Null),
-        syn::Type::Tuple(t) => Ty::Tuple(t.elems.iter().map(|e| lower_type(e, ctx)).collect()),
-        syn::Type::Path(p) => lower_path(p, ctx),
+        syn::Type::Tuple(t) => {
+            Ty::Tuple(t.elems.iter().map(|e| lower_type(e, ctx, loc, diags)).collect())
+        }
+        syn::Type::Path(p) => lower_path(p, ctx, loc, diags),
         _ => Ty::Unknown,
     }
 }
 
-fn lower_path(p: &syn::TypePath, ctx: &LowerCtx) -> Ty {
+/// TS keywords a `map_type` target commonly is, on purpose, when it drops a
+/// generic argument -- every built-in [`crate::presets::Preset`] targets
+/// `string` this way. Used only to keep the "did you forget `{0}`" warning
+/// from firing on this extremely common, clearly intentional pattern; it has
+/// no effect on whether the argument is actually dropped, which happens
+/// whenever the template has no placeholder, keyword or not.
+const TERMINAL_KEYWORDS: &[&str] =
+    &["string", "number", "boolean", "unknown", "any", "never", "null"];
+
+fn lower_path(p: &syn::TypePath, ctx: &LowerCtx, loc: &SourceLoc, diags: &mut Diagnostics) -> Ty {
     let Some(seg) = p.path.segments.last() else {
         return Ty::Unknown;
     };
     let name = seg.ident.to_string();
-    let args = type_args(seg, ctx);
+    let args = type_args(seg, ctx, loc, diags);
 
-    // Config overrides win before anything else. Generic arguments on the
-    // matched Rust type carry over, e.g. `Wrapper<T>` mapped to `"TsWrapper"`
-    // renders as `TsWrapper<T>`.
-    if let Some(raw) = ctx.map.get(&name) {
-        return Ty::Raw { name: raw.to_string(), args };
+    // Config overrides win before anything else.
+    if let Some(template) = ctx.map.get(&name) {
+        return apply_map_type(&name, template, args, loc, diags);
     }
 
     // A bare, unqualified identifier matching a declared type parameter.
@@ -121,7 +172,196 @@ fn lower_path(p: &syn::TypePath, ctx: &LowerCtx) -> Ty {
             Ty::Union(vec![wire_field("Ok", ok), wire_field("Err", err)])
         }
         "Value" => Ty::Unknown,
-        _ => Ty::Ref { name, args },
+        _ => resolve_alias_or_ref(name, args, ctx),
+    }
+}
+
+/// Builds the [`Ty::Raw`] for a `map_type` match, keeping `args` only when
+/// `template` actually references them via a `{0}`-style placeholder --
+/// otherwise they are dropped here, before they can reach an import or an
+/// "unknown type" diagnostic downstream. Warns when that drop looks like an
+/// oversight rather than the deliberate terminal pattern every built-in
+/// preset uses.
+fn apply_map_type(
+    name: &str,
+    template: &str,
+    args: Vec<Ty>,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Ty {
+    let used = !placeholder_positions(template).is_empty();
+    if !args.is_empty()
+        && !used
+        && !TERMINAL_KEYWORDS.contains(&template)
+        && !template.contains('<')
+    {
+        let n = args.len();
+        diags.push(
+            Diagnostic::warning(
+                loc.clone(),
+                format!(
+                    "map_type target `{template}` for `{name}` has no `{{0}}` placeholder, \
+                     but `{name}` was used here with {n} generic argument{}",
+                    if n == 1 { "" } else { "s" },
+                ),
+            )
+            .with_help(format!(
+                "add `{{0}}`{more} to the mapping to forward {them}, e.g. \
+                 .map_type(\"...::{name}\", \"{template}<{{0}}>\") -- or ignore this if \
+                 dropping {them} is intentional, the way string-valued presets do",
+                more = if n > 1 { " (and `{1}`, ...)" } else { "" },
+                them = if n == 1 { "it" } else { "them" },
+            )),
+        );
+    }
+    Ty::Raw {
+        template: template.to_string(),
+        args: if used { args } else { vec![] },
+    }
+}
+
+/// Falls back to a resolved type alias before giving up on a name as an
+/// unresolved reference to a to-be-generated declaration.
+fn resolve_alias_or_ref(name: String, args: Vec<Ty>, ctx: &LowerCtx) -> Ty {
+    if let Some(alias) = ctx.aliases.get(&name) {
+        if alias.params.len() == args.len() {
+            if alias.params.is_empty() {
+                return alias.ty.clone();
+            }
+            let subs: HashMap<String, Ty> =
+                alias.params.iter().cloned().zip(args).collect();
+            return substitute_params(&alias.ty, &subs);
+        }
+    }
+    Ty::Ref { name, args }
+}
+
+/// Replaces every [`Ty::Param`] in `ty` per `subs`, instantiating a generic
+/// type alias's lowered target with the arguments from a specific use site.
+fn substitute_params(ty: &Ty, subs: &HashMap<String, Ty>) -> Ty {
+    match ty {
+        Ty::Param(name) => subs.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::Array(inner) => Ty::Array(Box::new(substitute_params(inner, subs))),
+        Ty::Tuple(items) => Ty::Tuple(items.iter().map(|t| substitute_params(t, subs)).collect()),
+        Ty::Record { key, value } => Ty::Record {
+            key: Box::new(substitute_params(key, subs)),
+            value: Box::new(substitute_params(value, subs)),
+        },
+        Ty::Union(items) => Ty::Union(items.iter().map(|t| substitute_params(t, subs)).collect()),
+        Ty::Object(fields) => Ty::Object(
+            fields
+                .iter()
+                .map(|f| Field { ty: substitute_params(&f.ty, subs), ..f.clone() })
+                .collect(),
+        ),
+        Ty::Ref { name, args } => Ty::Ref {
+            name: name.clone(),
+            args: args.iter().map(|t| substitute_params(t, subs)).collect(),
+        },
+        Ty::Raw { template, args } => Ty::Raw {
+            template: template.clone(),
+            args: args.iter().map(|t| substitute_params(t, subs)).collect(),
+        },
+        Ty::Prim(_) | Ty::Unknown => ty.clone(),
+    }
+}
+
+/// Resolves every alias `raw` collected while scanning into an [`AliasTable`],
+/// in dependency order so `type A = B;` sees `B`'s resolution even when `B` is
+/// declared later in the scan. A cycle is reported and the aliases involved
+/// are left unresolved -- a field referencing one falls through to a plain
+/// reference and an "unknown type" diagnostic rather than looping forever.
+pub fn resolve_aliases(
+    raw: &HashMap<String, RawAlias>,
+    base: &LowerCtx,
+    diags: &mut Diagnostics,
+) -> AliasTable {
+    let mut resolved: HashMap<String, ResolvedAlias> = HashMap::new();
+    let mut visiting: HashSet<String> = HashSet::new();
+    let mut names: Vec<&String> = raw.keys().collect();
+    names.sort(); // deterministic diagnostic order, independent of scan order
+    for name in names {
+        resolve_one(name, raw, base, &mut resolved, &mut visiting, diags);
+    }
+    AliasTable(Rc::new(resolved))
+}
+
+fn resolve_one(
+    name: &str,
+    raw: &HashMap<String, RawAlias>,
+    base: &LowerCtx,
+    resolved: &mut HashMap<String, ResolvedAlias>,
+    visiting: &mut HashSet<String>,
+    diags: &mut Diagnostics,
+) -> Option<Ty> {
+    if let Some(r) = resolved.get(name) {
+        return Some(r.ty.clone());
+    }
+    let entry = raw.get(name)?;
+    if !visiting.insert(name.to_string()) {
+        diags.push(
+            Diagnostic::new(
+                entry.loc.clone(),
+                format!("type alias `{name}` is defined in terms of itself"),
+            )
+            .with_help(
+                "cyclic type aliases have no finite shape; break the cycle, or \
+                 map_type one side instead of aliasing it",
+            ),
+        );
+        return None;
+    }
+
+    // Dependencies are resolved first so their entries exist in `resolved`
+    // by the time this alias's target is lowered, whatever order the scan
+    // found the declarations in.
+    for dep in referenced_alias_names(&entry.target, raw) {
+        resolve_one(&dep, raw, base, resolved, visiting, diags);
+    }
+
+    let ctx = LowerCtx {
+        params: entry.params.iter().cloned().collect(),
+        map: base.map.clone(),
+        aliases: AliasTable(Rc::new(resolved.clone())),
+    };
+    let ty = lower_type(&entry.target, &ctx, &entry.loc, diags);
+    visiting.remove(name);
+    resolved.insert(name.to_string(), ResolvedAlias { params: entry.params.clone(), ty: ty.clone() });
+    Some(ty)
+}
+
+/// Collects the names of every other raw alias directly referenced by `ty`'s
+/// path segments (including inside generic arguments), so [`resolve_one`] can
+/// resolve dependencies before the alias that needs them.
+fn referenced_alias_names(ty: &syn::Type, raw: &HashMap<String, RawAlias>) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_alias_refs(ty, raw, &mut out);
+    out
+}
+
+fn collect_alias_refs(ty: &syn::Type, raw: &HashMap<String, RawAlias>, out: &mut Vec<String>) {
+    match ty {
+        syn::Type::Reference(r) => collect_alias_refs(&r.elem, raw, out),
+        syn::Type::Paren(p) => collect_alias_refs(&p.elem, raw, out),
+        syn::Type::Group(g) => collect_alias_refs(&g.elem, raw, out),
+        syn::Type::Slice(s) => collect_alias_refs(&s.elem, raw, out),
+        syn::Type::Array(a) => collect_alias_refs(&a.elem, raw, out),
+        syn::Type::Tuple(t) => t.elems.iter().for_each(|e| collect_alias_refs(e, raw, out)),
+        syn::Type::Path(p) => {
+            let Some(seg) = p.path.segments.last() else { return };
+            let name = seg.ident.to_string();
+            if raw.contains_key(&name) {
+                out.push(name);
+            }
+            if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
+                for a in &ab.args {
+                    if let syn::GenericArgument::Type(t) = a {
+                        collect_alias_refs(t, raw, out);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -138,14 +378,19 @@ fn wire_field(name: &str, ty: Ty) -> Ty {
     }])
 }
 
-fn type_args(seg: &syn::PathSegment, ctx: &LowerCtx) -> Vec<Ty> {
+fn type_args(
+    seg: &syn::PathSegment,
+    ctx: &LowerCtx,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<Ty> {
     let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
         return vec![];
     };
     ab.args
         .iter()
         .filter_map(|a| match a {
-            syn::GenericArgument::Type(t) => Some(lower_type(t, ctx)),
+            syn::GenericArgument::Type(t) => Some(lower_type(t, ctx, loc, diags)),
             // lifetimes and const args carry no wire shape
             _ => None,
         })
@@ -219,18 +464,27 @@ mod tests {
     use super::*;
     use crate::ir::{Prim, Ty};
 
+    fn dummy_loc() -> SourceLoc {
+        SourceLoc { file: "t.rs".into(), line: 1 }
+    }
+
     fn lower(src: &str) -> Ty {
-        let ty: syn::Type = syn::parse_str(src).expect("parse");
-        lower_type(&ty, &LowerCtx::default())
+        lower_with(src, &LowerCtx::default()).0
     }
 
     fn lower_generic(src: &str, params: &[&str]) -> Ty {
-        let ty: syn::Type = syn::parse_str(src).expect("parse");
         let ctx = LowerCtx {
             params: params.iter().map(|s| s.to_string()).collect(),
             ..LowerCtx::default()
         };
-        lower_type(&ty, &ctx)
+        lower_with(src, &ctx).0
+    }
+
+    fn lower_with(src: &str, ctx: &LowerCtx) -> (Ty, Diagnostics) {
+        let ty: syn::Type = syn::parse_str(src).expect("parse");
+        let mut diags = Diagnostics::default();
+        let result = lower_type(&ty, ctx, &dummy_loc(), &mut diags);
+        (result, diags)
     }
 
     #[test]
@@ -367,14 +621,15 @@ mod tests {
     fn type_map_overrides_by_final_segment() {
         let mut map = TypeMap::default();
         map.insert("uuid::Uuid", "string");
-        let ctx = LowerCtx {
-            map,
-            ..LowerCtx::default()
-        };
-        let ty: syn::Type = syn::parse_str("uuid::Uuid").unwrap();
-        assert_eq!(lower_type(&ty, &ctx), Ty::Raw { name: "string".into(), args: vec![] });
-        let bare: syn::Type = syn::parse_str("Uuid").unwrap();
-        assert_eq!(lower_type(&bare, &ctx), Ty::Raw { name: "string".into(), args: vec![] });
+        let ctx = LowerCtx { map, ..LowerCtx::default() };
+        assert_eq!(
+            lower_with("uuid::Uuid", &ctx).0,
+            Ty::Raw { template: "string".into(), args: vec![] }
+        );
+        assert_eq!(
+            lower_with("Uuid", &ctx).0,
+            Ty::Raw { template: "string".into(), args: vec![] }
+        );
     }
 
     #[test]
@@ -389,23 +644,81 @@ mod tests {
     }
 
     #[test]
-    fn mapped_generic_types_carry_their_arguments() {
-        // A `map_type` match against a generic Rust type forwards its
-        // arguments instead of discarding them.
+    fn a_map_type_with_a_placeholder_forwards_its_argument() {
         let mut map = TypeMap::default();
-        map.insert("some::Wrapper", "TsWrapper");
-        let ctx = LowerCtx {
-            map,
-            ..LowerCtx::default()
-        };
-        let ty: syn::Type = syn::parse_str("some::Wrapper<String>").unwrap();
+        map.insert("some::Wrapper", "TsWrapper<{0}>");
+        let ctx = LowerCtx { map, ..LowerCtx::default() };
+        let (ty, diags) = lower_with("some::Wrapper<String>", &ctx);
         assert_eq!(
-            lower_type(&ty, &ctx),
+            ty,
             Ty::Raw {
-                name: "TsWrapper".into(),
+                template: "TsWrapper<{0}>".into(),
                 args: vec![Ty::Prim(Prim::Str)]
             }
         );
+        assert!(diags.is_empty(), "a placeholder that's used needs no warning: {diags:?}");
+    }
+
+    #[test]
+    fn a_map_type_with_no_placeholder_drops_the_argument_entirely() {
+        // The terminal case: chrono::DateTime -> "string" must not carry
+        // DateTime<Utc>'s Utc forward, or it would need to resolve as an
+        // importable type and break the build over an argument nothing uses.
+        let mut map = TypeMap::default();
+        map.insert("chrono::DateTime", "string");
+        let ctx = LowerCtx { map, ..LowerCtx::default() };
+        let (ty, diags) = lower_with("chrono::DateTime<Utc>", &ctx);
+        assert_eq!(ty, Ty::Raw { template: "string".into(), args: vec![] });
+        assert!(diags.is_empty(), "a bare TS keyword target is a deliberate terminal: {diags:?}");
+    }
+
+    #[test]
+    fn a_shaped_alias_places_the_argument_inside_the_template() {
+        let mut map = TypeMap::default();
+        map.insert("dto::Patch", "{0} | null");
+        let ctx = LowerCtx { map, ..LowerCtx::default() };
+        let (ty, diags) = lower_with("dto::Patch<String>", &ctx);
+        assert_eq!(
+            ty,
+            Ty::Raw { template: "{0} | null".into(), args: vec![Ty::Prim(Prim::Str)] }
+        );
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn a_custom_terminal_with_no_placeholder_warns_its_probably_a_mistake() {
+        let mut map = TypeMap::default();
+        map.insert("mycrate::Wrapper", "TsWrapper");
+        let ctx = LowerCtx { map, ..LowerCtx::default() };
+        let (ty, diags) = lower_with("mycrate::Wrapper<String>", &ctx);
+        // The argument is still dropped -- a warning changes nothing about
+        // what gets emitted, only whether the author is told about it.
+        assert_eq!(ty, Ty::Raw { template: "TsWrapper".into(), args: vec![] });
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        let d = diags.iter().next().unwrap();
+        assert!(d.message.contains("TsWrapper"), "{}", d.message);
+        assert!(d.message.contains("Wrapper"), "{}", d.message);
+        assert!(d.message.contains("{0}"), "{}", d.message);
+    }
+
+    #[test]
+    fn a_template_that_already_spells_out_its_own_generics_does_not_warn() {
+        // The author wrote a fixed instantiation on purpose; dropping the
+        // source argument is clearly deliberate here, same as a keyword target.
+        let mut map = TypeMap::default();
+        map.insert("mycrate::Wrapper", "SomeUtility<string>");
+        let ctx = LowerCtx { map, ..LowerCtx::default() };
+        let (_, diags) = lower_with("mycrate::Wrapper<String>", &ctx);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn a_map_type_with_no_arguments_at_the_use_site_never_warns() {
+        let mut map = TypeMap::default();
+        map.insert("mycrate::Wrapper", "TsWrapper");
+        let ctx = LowerCtx { map, ..LowerCtx::default() };
+        let (_, diags) = lower_with("mycrate::Wrapper", &ctx);
+        assert!(diags.is_empty(), "no argument was dropped, so nothing to warn about: {diags:?}");
     }
 
     #[test]

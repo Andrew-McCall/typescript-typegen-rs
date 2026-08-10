@@ -4,7 +4,7 @@
 //! integer width, optionality style, interface vs alias — lives here.
 
 use crate::config::{BigInt, Bytes, Config, OptionalStyle, StructStyle, UnknownStyle};
-use crate::ir::{Body, Decl, EnumRepr, Field, Prim, Ty, Variant, VariantKind};
+use crate::ir::{Body, Decl, EnumRepr, Field, Prim, Ty, Variant, VariantKind, placeholder_positions};
 
 const INDENT: &str = "  ";
 
@@ -46,11 +46,7 @@ pub fn emit_ty(ty: &Ty, cfg: &Config) -> String {
             format!("{name}<{}>", parts.join(", "))
         }
         Ty::Param(name) => name.clone(),
-        Ty::Raw { name, args } if args.is_empty() => name.clone(),
-        Ty::Raw { name, args } => {
-            let parts: Vec<String> = args.iter().map(|t| emit_ty(t, cfg)).collect();
-            format!("{name}<{}>", parts.join(", "))
-        }
+        Ty::Raw { template, args } => emit_raw(template, args, cfg),
         Ty::Unknown => match cfg.unknown_style() {
             UnknownStyle::Unknown => "unknown".to_string(),
             UnknownStyle::Any => "any".to_string(),
@@ -73,6 +69,31 @@ fn ro(f: &Field) -> &'static str {
 
 fn needs_parens(ty: &Ty) -> bool {
     matches!(ty, Ty::Union(arms) if arms.len() > 1)
+}
+
+/// Renders a [`Ty::Raw`] template, substituting `{0}`, `{1}`, ... with the
+/// rendered argument at that position. A template with no placeholder emits
+/// verbatim, ignoring `args` entirely -- the terminal case, e.g. mapping
+/// `chrono::DateTime` to `"string"`. An out-of-range index is left as literal
+/// text rather than panicking; lowering already warns about a mismatch like
+/// that when it can tell one occurred.
+fn emit_raw(template: &str, args: &[Ty], cfg: &Config) -> String {
+    let positions = placeholder_positions(template);
+    if positions.is_empty() {
+        return template.to_string();
+    }
+    let mut out = String::with_capacity(template.len());
+    let mut last = 0;
+    for (start, end, idx) in positions {
+        out.push_str(&template[last..start]);
+        match args.get(idx) {
+            Some(arg) => out.push_str(&emit_ty(arg, cfg)),
+            None => out.push_str(&template[start..end]),
+        }
+        last = end;
+    }
+    out.push_str(&template[last..]);
+    out
 }
 
 fn emit_prim(p: &Prim, cfg: &Config) -> String {
@@ -333,9 +354,53 @@ mod tests {
         assert_eq!(emit_ty(&Ty::Prim(Prim::Null), &c), "null");
         assert_eq!(emit_ty(&Ty::Unknown, &c), "unknown");
         assert_eq!(
-            emit_ty(&Ty::Raw { name: "Foo<Bar>".into(), args: vec![] }, &c),
+            emit_ty(&Ty::Raw { template: "Foo<Bar>".into(), args: vec![] }, &c),
             "Foo<Bar>"
         );
+    }
+
+    #[test]
+    fn raw_with_no_placeholder_ignores_its_arguments() {
+        // The terminal case: a config mapping that drops its generic argument,
+        // e.g. chrono::DateTime -> "string" regardless of DateTime<Utc>.
+        let c = Config::new();
+        let ty = Ty::Raw { template: "string".into(), args: vec![Ty::Prim(Prim::Bool)] };
+        assert_eq!(emit_ty(&ty, &c), "string");
+    }
+
+    #[test]
+    fn raw_substitutes_a_single_placeholder() {
+        let c = Config::new();
+        let ty = Ty::Raw {
+            template: "TsWrapper<{0}>".into(),
+            args: vec![Ty::Prim(Prim::Str)],
+        };
+        assert_eq!(emit_ty(&ty, &c), "TsWrapper<string>");
+    }
+
+    #[test]
+    fn raw_substitutes_a_placeholder_placed_anywhere_in_the_template() {
+        // The "shaped alias" case: the argument isn't wrapped in a name at all.
+        let c = Config::new();
+        let ty = Ty::Raw { template: "{0} | null".into(), args: vec![Ty::Prim(Prim::Bool)] };
+        assert_eq!(emit_ty(&ty, &c), "boolean | null");
+    }
+
+    #[test]
+    fn raw_substitutes_multiple_placeholders_by_index() {
+        let c = Config::new();
+        let ty = Ty::Raw {
+            template: "[{1}, {0}]".into(),
+            args: vec![Ty::Prim(Prim::Bool), Ty::Prim(Prim::Str)],
+        };
+        assert_eq!(emit_ty(&ty, &c), "[string, boolean]");
+    }
+
+    #[test]
+    fn raw_leaves_an_out_of_range_placeholder_literal() {
+        let c = Config::new();
+        let ty = Ty::Raw { template: "{0}<{1}>".into(), args: vec![Ty::Prim(Prim::Str)] };
+        assert_eq!(emit_ty(&ty, &c), "string<{1}>");
     }
 
     #[test]

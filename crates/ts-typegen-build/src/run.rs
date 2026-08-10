@@ -57,7 +57,11 @@ pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
         return Ok(Outcome { report: WriteReport::default(), skipped: true, warnings: Vec::new() });
     }
 
-    let ctx = LowerCtx { params: Default::default(), map: cfg.type_map().clone() };
+    let ctx = LowerCtx {
+        params: Default::default(),
+        map: cfg.type_map().clone(),
+        aliases: Default::default(),
+    };
     let mut diags = Diagnostics::default();
     let reg = scan_roots(cfg.scans(), &ctx, &mut diags);
     if reg.decls().is_empty() {
