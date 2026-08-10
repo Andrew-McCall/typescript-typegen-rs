@@ -7,6 +7,7 @@
 
 use proc_macro::TokenStream;
 
+/// The `Ts` derive macro. See the crate-level docs for what it does.
 #[proc_macro_derive(Ts, attributes(ts))]
 pub fn derive_ts(input: TokenStream) -> TokenStream {
     #[cfg(feature = "strict")]

@@ -6,6 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
+/// Marks a type as having a known TypeScript binding. Implemented for every
+/// type the lowering pipeline understands; a field whose type has no impl
+/// fails to compile instead of silently emitting `unknown`.
 pub trait TsType {}
 
 macro_rules! impl_ts_type {

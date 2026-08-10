@@ -12,6 +12,9 @@ use crate::ir::{Registry, SourceLoc};
 use crate::lower::LowerCtx;
 use crate::parse::{has_ts_derive, parse_item};
 
+/// Walks every root's `mod` tree, collecting every `#[derive(Ts)]` struct
+/// and enum into a [`Registry`]. `#[cfg(...)]` is not evaluated, so a type
+/// gated out for the current build still produces a binding.
 pub fn scan_roots(roots: &[PathBuf], ctx: &LowerCtx, diags: &mut Diagnostics) -> Registry {
     let mut reg = Registry::default();
     let mut seen = HashSet::new();

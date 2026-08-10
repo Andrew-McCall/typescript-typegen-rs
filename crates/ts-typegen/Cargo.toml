@@ -23,6 +23,9 @@ ts-typegen-macros.workspace = true
 default = []
 strict = ["ts-typegen-macros/strict"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dev-dependencies]
 trybuild = "1.0.119"
 serde = { version = "1", features = ["derive"] }

@@ -54,6 +54,7 @@ impl Preset {
         }
     }
 
+    /// The `(rust_path, ts)` pairs this preset installs.
     pub fn expand(&self) -> Vec<(&'static str, &'static str)> {
         match self {
             Preset::Common => [

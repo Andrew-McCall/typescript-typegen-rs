@@ -10,7 +10,10 @@ pub enum BigInt {
     /// Matches what `serde_json` puts on the wire. Lossy above 2^53.
     #[default]
     Number,
+    /// A native TypeScript `bigint`. Only correct if your decoder actually
+    /// produces one — plain `JSON.parse` never does.
     Bigint,
+    /// A string, for codecs that serialize wide integers as text.
     Str,
 }
 
@@ -35,6 +38,7 @@ pub enum Bytes {
     Str,
 }
 
+/// How an `Option<T>` field renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptionalStyle {
     /// `field: T | null` — serde serializes `None` as `null` with the key present.
@@ -46,6 +50,7 @@ pub enum OptionalStyle {
     Both,
 }
 
+/// How named-field structs render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StructStyle {
     /// Named-field structs emit `export interface X { ... }`.
@@ -55,6 +60,8 @@ pub enum StructStyle {
     TypeAlias,
 }
 
+/// Builder for a generation run. Construct with [`Config::new`], chain
+/// setters, then call [`Config::run`] from `build.rs`.
 #[derive(Debug, Clone)]
 pub struct Config {
     scans: Vec<PathBuf>,
@@ -99,6 +106,7 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Starts a new config with every option at its default.
     pub fn new() -> Self {
         Self::default()
     }
@@ -114,16 +122,19 @@ impl Config {
         self
     }
 
+    /// Directory `.ts` files are written to.
     pub fn output(mut self, path: impl Into<PathBuf>) -> Self {
         self.output = path.into();
         self
     }
 
+    /// Whether to write a barrel file re-exporting every generated type.
     pub fn index(mut self, on: bool) -> Self {
         self.index = on;
         self
     }
 
+    /// File name for the barrel file, when [`Config::index`] is enabled.
     pub fn index_name(mut self, name: impl Into<String>) -> Self {
         self.index_name = name.into();
         self
@@ -172,11 +183,13 @@ impl Config {
         self
     }
 
+    /// How `Option<T>` fields render.
     pub fn optional_style(mut self, s: OptionalStyle) -> Self {
         self.optional_style = s;
         self
     }
 
+    /// How named-field structs render.
     pub fn struct_style(mut self, s: StructStyle) -> Self {
         self.struct_style = s;
         self
@@ -189,6 +202,9 @@ impl Config {
         self
     }
 
+    /// Overrides the TypeScript rendering of a type by Rust path, matched on
+    /// the final path segment — so `"uuid::Uuid"` matches a field written as
+    /// `Uuid` after a `use` too.
     pub fn map_type(mut self, rust_path: &str, ts: &str) -> Self {
         self.type_map.insert(rust_path, ts);
         self
@@ -203,6 +219,9 @@ impl Config {
         self
     }
 
+    /// When enabled, generate in memory and diff against what's on disk
+    /// instead of writing, failing [`Config::run`] if they differ. Defaults to
+    /// on when the `TS_TYPEGEN_CHECK` environment variable is set.
     pub fn check(mut self, on: bool) -> Self {
         self.check = on;
         self
@@ -248,48 +267,65 @@ impl Config {
 
     // Readers. Named apart from the setters above, which already own the
     // obvious names.
+
+    /// Directories that will be scanned for `#[derive(Ts)]` types.
     pub fn scans(&self) -> &[PathBuf] {
         &self.scans
     }
+    /// Directory `.ts` files will be written to.
     pub fn output_path(&self) -> &Path {
         &self.output
     }
+    /// Whether a barrel file will be written.
     pub fn index_enabled(&self) -> bool {
         self.index
     }
+    /// File name for the barrel file.
     pub fn index_file_name(&self) -> &str {
         &self.index_name
     }
+    /// Configured style for `i64`, `u64`, `isize` and `usize`.
     pub fn int64_style(&self) -> BigInt {
         self.int64
     }
+    /// Configured style for `i128` and `u128`.
     pub fn int128_style(&self) -> BigInt {
         self.int128
     }
+    /// Configured style for opaque values such as `serde_json::Value`.
     pub fn unknown_style(&self) -> UnknownStyle {
         self.unknown
     }
+    /// Lines inserted after the generated-file marker in every emitted file.
     pub fn header_lines(&self) -> &str {
         &self.header
     }
+    /// Configured style for `Vec<u8>` and `[u8; N]`.
     pub fn bytes_style(&self) -> Bytes {
         self.bytes
     }
+    /// Configured style for `Option<T>` fields.
     pub fn optional(&self) -> OptionalStyle {
         self.optional_style
     }
+    /// Configured style for named-field structs.
     pub fn structs(&self) -> StructStyle {
         self.struct_style
     }
+    /// Extension appended to import specifiers.
     pub fn extension(&self) -> &str {
         &self.import_extension
     }
+    /// The accumulated type overrides from [`Config::map_type`] and
+    /// [`Config::preset`].
     pub fn type_map(&self) -> &TypeMap {
         &self.type_map
     }
+    /// Whether [`Config::run`] will check for drift instead of writing.
     pub fn is_check(&self) -> bool {
         self.check
     }
+    /// Whether generation runs even when this package is not cargo's primary package.
     pub fn always_run_enabled(&self) -> bool {
         self.always_run
     }

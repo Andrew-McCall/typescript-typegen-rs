@@ -10,8 +10,10 @@ use crate::render::render_all;
 use crate::scan::scan_roots;
 use crate::write::{WriteReport, write_all};
 
+/// The result of a successful [`generate`] call.
 #[derive(Debug)]
 pub struct Outcome {
+    /// Which files were written, unchanged, or removed.
     pub report: WriteReport,
     /// True when generation was skipped because this is not a primary package.
     pub skipped: bool,
@@ -19,6 +21,8 @@ pub struct Outcome {
     pub warnings: Vec<String>,
 }
 
+/// [`generate`]'s error type: every collected [`Diagnostic`](crate::diag::Diagnostic),
+/// pre-formatted into one message.
 #[derive(Debug)]
 pub struct DiagError(String);
 
@@ -45,6 +49,9 @@ fn is_downstream_build() -> bool {
     std::env::var("CARGO_MANIFEST_DIR").is_ok_and(|d| looks_vendored(&d))
 }
 
+/// Runs the full pipeline: scan, lower, render, and write. This is what
+/// [`Config::run`](crate::config::Config::run) calls; use it directly to get
+/// the [`Outcome`] instead of having results printed as cargo directives.
 pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
     if !cfg.always_run_enabled() && is_downstream_build() {
         return Ok(Outcome { report: WriteReport::default(), skipped: true, warnings: Vec::new() });

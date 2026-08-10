@@ -10,6 +10,8 @@ use crate::diag::{Diagnostic, Diagnostics};
 use crate::ir::{Body, Decl, EnumRepr, Field, SourceLoc, Ty, Variant, VariantKind};
 use crate::lower::{LowerCtx, lower_type};
 
+/// Whether `attrs` includes `#[derive(Ts)]` (matched by last path segment,
+/// so a re-exported or aliased `Ts` is still recognised).
 pub fn has_ts_derive(attrs: &[syn::Attribute]) -> bool {
     let mut found = false;
     for attr in attrs.iter().filter(|a| a.path().is_ident("derive")) {
@@ -134,6 +136,10 @@ fn loc_of(file: &Path, span: proc_macro2::Span) -> SourceLoc {
     }
 }
 
+/// Parses one `#[derive(Ts)]`-carrying struct or enum into a [`Decl`],
+/// reading its `#[ts(...)]` / `#[serde(...)]` attributes and lowering every
+/// field. Returns `None` and pushes a diagnostic instead of failing outright
+/// where the item itself is unusable (e.g. a union).
 pub fn parse_item(
     item: &syn::DeriveInput,
     module_path: &str,

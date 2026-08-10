@@ -12,10 +12,22 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::render::MARKER;
 
+/// Everything that can go wrong writing generated files to disk.
 #[derive(Debug)]
 pub enum WriteError {
-    Overlap { output: PathBuf, scan: PathBuf },
+    /// The output directory overlaps a scan root, which would make generated
+    /// files re-scanned on every build.
+    Overlap {
+        /// The configured output directory.
+        output: PathBuf,
+        /// The scan root it overlaps.
+        scan: PathBuf,
+    },
+    /// A filesystem operation failed.
     Io(std::io::Error),
+    /// [`Config::check`](crate::config::Config::check) mode found the
+    /// on-disk bindings differ from what generation would produce; one
+    /// formatted diff per changed or missing file.
     Drift(Vec<String>),
 }
 
@@ -49,10 +61,14 @@ impl From<std::io::Error> for WriteError {
     }
 }
 
+/// What [`write_all`] did, broken down by file name.
 #[derive(Debug, Default)]
 pub struct WriteReport {
+    /// Files written because they were new or their content changed.
     pub written: Vec<String>,
+    /// Files whose on-disk content already matched and were left untouched.
     pub unchanged: Vec<String>,
+    /// Previously-generated files deleted because no current type produces them.
     pub removed: Vec<String>,
 }
 
@@ -72,6 +88,9 @@ fn normalise(p: &Path) -> PathBuf {
     out
 }
 
+/// Checks that the configured output directory does not overlap any scan
+/// root. Called by [`write_all`] before touching the filesystem, and
+/// available separately so callers can fail fast before generation runs.
 pub fn validate_paths(cfg: &Config) -> Result<(), WriteError> {
     let out = normalise(cfg.output_path());
     for scan in cfg.scans() {
@@ -83,6 +102,10 @@ pub fn validate_paths(cfg: &Config) -> Result<(), WriteError> {
     Ok(())
 }
 
+/// Writes `files` (name to contents) into [`Config::output_path`], skipping
+/// unchanged files and deleting stale generated files no longer produced.
+/// In [`Config::check`] mode, nothing is written; instead this compares
+/// against what's on disk and returns [`WriteError::Drift`] if it differs.
 pub fn write_all(
     files: &BTreeMap<String, String>,
     cfg: &Config,

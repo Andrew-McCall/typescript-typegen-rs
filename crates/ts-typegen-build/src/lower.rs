@@ -13,20 +13,25 @@ use crate::ir::{Field, Prim, Ty};
 pub struct TypeMap(HashMap<String, String>);
 
 impl TypeMap {
+    /// Adds an override, keyed by `rust_path`'s final `::`-separated segment.
     pub fn insert(&mut self, rust_path: &str, ts: &str) {
         let key = rust_path.rsplit("::").next().unwrap_or(rust_path);
         self.0.insert(key.to_string(), ts.to_string());
     }
 
+    /// Looks up an override by a type's final path segment.
     pub fn get(&self, last_segment: &str) -> Option<&str> {
         self.0.get(last_segment).map(String::as_str)
     }
 }
 
+/// Context threaded through [`lower_type`]: the enclosing declaration's
+/// generic parameters and the configured type overrides.
 #[derive(Debug, Default, Clone)]
 pub struct LowerCtx {
     /// Type parameters of the enclosing declaration.
     pub params: HashSet<String>,
+    /// Configured type overrides, checked before any built-in mapping.
     pub map: TypeMap,
 }
 
@@ -44,6 +49,8 @@ const ARRAYS: &[&str] = &[
 ];
 const MAPS: &[&str] = &["HashMap", "BTreeMap", "IndexMap"];
 
+/// Lowers a parsed Rust type to its IR [`Ty`], per the wire shape
+/// `serde_json` actually produces — not a structural translation.
 pub fn lower_type(ty: &syn::Type, ctx: &LowerCtx) -> Ty {
     match ty {
         syn::Type::Reference(r) => lower_type(&r.elem, ctx),

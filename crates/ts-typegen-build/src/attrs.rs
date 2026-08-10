@@ -4,19 +4,29 @@
 //! escape hatch, so it must be able to contradict serde.
 
 
+/// One of serde's `rename_all` casing rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameRule {
+    /// `lowercase`
     Lower,
+    /// `UPPERCASE`
     Upper,
+    /// `PascalCase`
     Pascal,
+    /// `camelCase`
     Camel,
+    /// `snake_case`
     Snake,
+    /// `SCREAMING_SNAKE_CASE`
     ScreamingSnake,
+    /// `kebab-case`
     Kebab,
+    /// `SCREAMING-KEBAB-CASE`
     ScreamingKebab,
 }
 
 impl RenameRule {
+    /// Parses serde's string form of a `rename_all` value, e.g. `"camelCase"`.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "lowercase" => Self::Lower,
@@ -139,18 +149,42 @@ fn lower_first(mut s: String) -> String {
     }
 }
 
+/// The merged, normalized result of every `#[ts(...)]` and `#[serde(...)]`
+/// attribute found on one item, field, or variant.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Attrs {
+    /// `#[ts(rename = "...")]` or `#[serde(rename = "...")]` — overrides the
+    /// emitted name outright.
     pub rename: Option<String>,
+    /// `#[serde(rename_all = "...")]` — casing rule applied to every field
+    /// name in this container.
     pub rename_all: Option<RenameRule>,
+    /// `#[serde(rename_all_fields = "...")]` — casing rule applied to every
+    /// field name across all struct variants of an enum.
     pub rename_all_fields: Option<RenameRule>,
+    /// `#[ts(skip)]`, `#[serde(skip)]`, or `#[serde(skip_serializing)]` —
+    /// omit this item from the output.
     pub skip: bool,
+    /// `#[ts(optional)]` or `#[serde(skip_serializing_if = "...")]` — force
+    /// this field to render with `?:` regardless of its Rust type.
     pub optional: bool,
+    /// `#[serde(flatten)]` — splice this field's shape into its parent
+    /// instead of nesting it under its own key.
     pub flatten: bool,
+    /// `#[serde(transparent)]` — the container serializes exactly like its
+    /// single field.
     pub transparent: bool,
+    /// `#[ts(type = "...")]` / `#[ts(as = "...")]` — verbatim TypeScript,
+    /// skipping type lowering entirely.
     pub ts_type: Option<String>,
+    /// `#[serde(tag = "...")]` — the field name carrying the variant tag for
+    /// internally- or adjacently-tagged enums.
     pub tag: Option<String>,
+    /// `#[serde(content = "...")]` — the field name carrying the payload for
+    /// an adjacently-tagged enum.
     pub content: Option<String>,
+    /// `#[serde(untagged)]` — no tag at all; variants are distinguished only
+    /// by shape.
     pub untagged: bool,
     /// `#[ts(readonly)]` — emit `readonly` on this field, or on every field of
     /// this type when set at container level.
@@ -168,6 +202,9 @@ pub struct Attrs {
 // cannot change the shape we emit. Use `#[ts(optional)]` to mark a field
 // optional regardless.
 
+/// Reads every `#[serde(...)]` attribute first, then every `#[ts(...)]`
+/// attribute, into one merged [`Attrs`] — so a `ts` entry always overrides
+/// the corresponding `serde` one where both are present.
 pub fn parse_attrs(attrs: &[syn::Attribute]) -> Attrs {
     let mut out = Attrs::default();
     // serde first so that a later ts entry overwrites it.
@@ -255,6 +292,8 @@ fn nested_serialize_value(meta: &syn::meta::ParseNestedMeta<'_>) -> Option<Strin
     found
 }
 
+/// Extracts `///` doc comment lines, trimmed, in source order — for carrying
+/// Rust doc comments over into the generated TypeScript as TSDoc.
 pub fn doc_lines(attrs: &[syn::Attribute]) -> Vec<String> {
     attrs
         .iter()

@@ -22,3 +22,6 @@ proc-macro2.workspace = true
 [features]
 default = []
 strict = []
+
+[package.metadata.docs.rs]
+all-features = true

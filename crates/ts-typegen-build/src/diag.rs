@@ -3,6 +3,7 @@
 
 use crate::ir::SourceLoc;
 
+/// How serious a [`Diagnostic`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     /// Correct output is impossible; fail the build.
@@ -12,15 +13,22 @@ pub enum Severity {
     Warning,
 }
 
+/// A single problem found while parsing or lowering, pointing at the source
+/// location that caused it.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
+    /// Whether this stops the build or is merely reported.
     pub severity: Severity,
+    /// Where in the source this diagnostic applies.
     pub loc: SourceLoc,
+    /// The problem, in one line.
     pub message: String,
+    /// Optional suggested fix, printed as a `help:` line.
     pub help: Option<String>,
 }
 
 impl Diagnostic {
+    /// Creates an error-severity diagnostic.
     pub fn new(loc: SourceLoc, message: impl Into<String>) -> Self {
         Diagnostic {
             severity: Severity::Error,
@@ -30,6 +38,7 @@ impl Diagnostic {
         }
     }
 
+    /// Creates a warning-severity diagnostic.
     pub fn warning(loc: SourceLoc, message: impl Into<String>) -> Self {
         Diagnostic {
             severity: Severity::Warning,
@@ -39,32 +48,40 @@ impl Diagnostic {
         }
     }
 
+    /// Attaches a suggested fix, printed as a `help:` line.
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self
     }
 
+    /// Whether this diagnostic is error-severity.
     pub fn is_error(&self) -> bool {
         self.severity == Severity::Error
     }
 }
 
+/// An ordered collection of every [`Diagnostic`] raised during a generation
+/// run, so a single build reports every issue instead of stopping at the first.
 #[derive(Debug, Default)]
 pub struct Diagnostics(Vec<Diagnostic>);
 
 impl Diagnostics {
+    /// Records a diagnostic.
     pub fn push(&mut self, d: Diagnostic) {
         self.0.push(d);
     }
 
+    /// Whether no diagnostics have been recorded.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Total number of diagnostics recorded, errors and warnings combined.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Iterates every diagnostic in the order it was pushed.
     pub fn iter(&self) -> std::slice::Iter<'_, Diagnostic> {
         self.0.iter()
     }
@@ -76,6 +93,7 @@ impl Diagnostics {
         self.iter().any(Diagnostic::is_error)
     }
 
+    /// Number of error-severity diagnostics, excluding warnings.
     pub fn error_count(&self) -> usize {
         self.iter().filter(|d| d.is_error()).count()
     }

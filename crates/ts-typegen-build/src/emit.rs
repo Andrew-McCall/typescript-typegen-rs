@@ -8,6 +8,7 @@ use crate::ir::{Body, Decl, EnumRepr, Field, Prim, Ty, Variant, VariantKind};
 
 const INDENT: &str = "  ";
 
+/// Renders one IR type as a TypeScript type expression, e.g. `string | null`.
 pub fn emit_ty(ty: &Ty, cfg: &Config) -> String {
     match ty {
         Ty::Prim(p) => emit_prim(p, cfg),
@@ -126,6 +127,8 @@ fn strip_null(ty: &Ty) -> Ty {
     }
 }
 
+/// Renders doc comment lines as a `/** ... */` TSDoc block, indented by
+/// `indent`. Returns an empty string when `docs` is empty.
 pub fn tsdoc(docs: &[String], indent: &str) -> String {
     if docs.is_empty() {
         return String::new();
@@ -157,6 +160,8 @@ fn generics_head(decl: &Decl) -> String {
     }
 }
 
+/// Renders one declaration as a complete TypeScript statement — an
+/// `interface`, `type` alias, or tagged-union `type`, per its [`Body`].
 pub fn emit_decl(decl: &Decl, cfg: &Config) -> String {
     let head = tsdoc(&decl.docs, "");
     let name = &decl.ts_name;
