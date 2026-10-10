@@ -83,12 +83,22 @@ pub fn classify(
             Extractor::Ignore => {}
 
             Extractor::Path => {
-                if out.path.is_none() {
-                    out.path = Some(PathExtractor {
-                        binding: path_binding(&pat_type.pat),
-                        ty: effective.clone(),
-                    });
+                let binding = path_binding(&pat_type.pat);
+                if let Some(existing) = &out.path {
+                    diags.push(
+                        Diagnostic::new(
+                            loc.clone(),
+                            format!(
+                                "handler takes two path extractors, `{}` and `{}`",
+                                describe_path_binding(&existing.binding),
+                                describe_path_binding(&binding),
+                            ),
+                        )
+                        .with_help("a route has one path template; remove one"),
+                    );
+                    continue;
                 }
+                out.path = Some(PathExtractor { binding, ty: effective.clone() });
             }
 
             Extractor::Query => {
@@ -193,6 +203,17 @@ fn path_binding(pat: &syn::Pat) -> PathBinding {
         }
     }
     PathBinding::Opaque
+}
+
+/// A short, readable name for a [`PathBinding`], for naming it in a
+/// diagnostic: `id` for `One`, `(id, slug)` for `Tuple`, and a fixed
+/// placeholder for `Opaque`, which has no name to show.
+fn describe_path_binding(b: &PathBinding) -> String {
+    match b {
+        PathBinding::One(name) => name.clone(),
+        PathBinding::Tuple(names) => format!("({})", names.join(", ")),
+        PathBinding::Opaque => "<opaque>".to_string(),
+    }
 }
 
 /// Strips a reference, paren, or group wrapper to get at the type underneath.
@@ -314,5 +335,15 @@ mod tests {
         let (e, d) = run("async fn h(body: Option<Json<NewScheme>>) {}", &Axum::new());
         assert!(!d.has_errors());
         assert!(e.body.is_some());
+    }
+
+    #[test]
+    fn two_path_extractors_error_naming_both_and_keep_the_first() {
+        let (e, d) =
+            run("async fn h(Path(id): Path<i64>, Path(slug): Path<String>) {}", &Axum::new());
+        assert!(d.has_errors());
+        let m = &d.iter().next().unwrap().message;
+        assert!(m.contains("id") && m.contains("slug"), "both bindings must be named, got: {m}");
+        assert_eq!(e.path.unwrap().binding, PathBinding::One("id".to_string()));
     }
 }
