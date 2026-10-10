@@ -4,9 +4,14 @@
 //! looked up in [`Axum::extractor_for`]; anything the config doesn't
 //! recognize is an error rather than a silent skip.
 
+use std::collections::HashMap;
+
+use crate::attrs::RenameRule;
 use crate::axum::config::{Axum, Extractor};
+use crate::axum::path::Segment;
+use crate::axum::routes::Overrides;
 use crate::diag::{Diagnostic, Diagnostics};
-use crate::ir::{RouteBody, SourceLoc, Ty};
+use crate::ir::{Body, Field, Prim, Registry, RouteBody, RouteParam, SourceLoc, Ty};
 use crate::lower::{LowerCtx, lower_type};
 
 /// How a [`PathExtractor`]'s pattern names its captured value(s).
@@ -265,9 +270,271 @@ fn first_generic_arg(ty: &syn::Type) -> Option<&syn::Type> {
     })
 }
 
+/// Zips a route template's captures against its handler's `Path<..>`
+/// extractor, producing one [`RouteParam`] per capture in template order.
+///
+/// With no `Path` extractor at all, every capture widens to `string |
+/// number` and the route gets a single warning naming all of them -- axum
+/// still binds the route, it just gives the handler nothing typed to read
+/// the capture as. With a count mismatch -- too few or too many values for
+/// the captures, including a `Path<Struct>` whose field count doesn't match
+/// -- one error names both counts and the route is dropped (an empty
+/// `Vec`) rather than emitted half-formed.
+pub fn zip_params(
+    segs: &[Segment],
+    ex: Option<&PathExtractor>,
+    ov: &Overrides,
+    reg: &Registry,
+    ctx: &LowerCtx,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<RouteParam> {
+    let captures = capture_specs(segs);
+
+    let Some(ex) = ex else {
+        return widen_without_extractor(&captures, ov, loc, diags);
+    };
+
+    let Some(inner) = first_generic_arg(&ex.ty) else {
+        return zip_scalar(&captures, Ty::Unknown, one_binding_name(&ex.binding), ov, loc, diags);
+    };
+
+    if let syn::Type::Tuple(t) = peel(inner) {
+        let elem_types: Vec<Ty> = t.elems.iter().map(|e| lower_type(e, ctx, loc, diags)).collect();
+        return zip_tuple(&captures, elem_types, ov, loc, diags);
+    }
+
+    if let Some(fields) = struct_fields_for(inner, reg) {
+        return zip_struct(&captures, fields, ov, loc, diags);
+    }
+
+    let ty = lower_type(inner, ctx, loc, diags);
+    zip_scalar(&captures, ty, one_binding_name(&ex.binding), ov, loc, diags)
+}
+
+/// Every [`Segment::Capture`] in a template, in order, paired with its
+/// wildcard flag -- [`crate::axum::path::capture_names`] drops the flag, and
+/// zipping needs it to carry over onto the resulting [`RouteParam`].
+fn capture_specs(segs: &[Segment]) -> Vec<(String, bool)> {
+    segs.iter()
+        .filter_map(|seg| match seg {
+            Segment::Capture { name, wildcard } => Some((name.clone(), *wildcard)),
+            Segment::Literal(_) => None,
+        })
+        .collect()
+}
+
+/// The bound name for a `Path<..>` extractor whose pattern is a single
+/// identifier, e.g. `id` for `Path(id): Path<i64>`. `None` for a tuple or
+/// opaque binding, which have no single name to offer.
+fn one_binding_name(binding: &PathBinding) -> Option<&str> {
+    match binding {
+        PathBinding::One(name) => Some(name.as_str()),
+        PathBinding::Tuple(_) | PathBinding::Opaque => None,
+    }
+}
+
+/// A registered struct's fields, if `ty`'s final path segment names a
+/// [`Body::Struct`] declaration in `reg` -- the same final-segment matching
+/// `Config::map_type` uses, since the generic argument as written may be a
+/// bare name or a path qualified by whatever the handler's module imported.
+fn struct_fields_for<'a>(ty: &syn::Type, reg: &'a Registry) -> Option<&'a [Field]> {
+    let name = final_segment(ty)?;
+    reg.decls().iter().find_map(|decl| {
+        if decl.rust_path.rsplit("::").next().unwrap_or(&decl.rust_path) != name {
+            return None;
+        }
+        match &decl.body {
+            Body::Struct(fields) => Some(fields.as_slice()),
+            _ => None,
+        }
+    })
+}
+
+/// Zips captures positionally against a `Path<(A, B, ...)>` tuple's element
+/// types. Names always come from the template, never from the binding's
+/// tuple-element identifiers -- those are typically throwaway pattern names
+/// (`Path((a, b))`) with no TS-facing meaning of their own.
+fn zip_tuple(
+    captures: &[(String, bool)],
+    elem_types: Vec<Ty>,
+    ov: &Overrides,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<RouteParam> {
+    let arity = elem_types.len();
+    if captures.len() != arity {
+        return arity_mismatch(captures.len(), arity, loc, diags);
+    }
+    captures
+        .iter()
+        .zip(elem_types)
+        .map(|((name, wildcard), ty)| RouteParam {
+            name: resolve_name(name, None, ov),
+            ty: resolve_ty(name, ov, ty),
+            wildcard: *wildcard,
+        })
+        .collect()
+}
+
+/// Zips a single capture against a `Path<T>` scalar's type. `binding` is the
+/// extractor's bound identifier, if it has one plain enough to name.
+fn zip_scalar(
+    captures: &[(String, bool)],
+    ty: Ty,
+    binding: Option<&str>,
+    ov: &Overrides,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<RouteParam> {
+    if captures.len() != 1 {
+        return arity_mismatch(captures.len(), 1, loc, diags);
+    }
+    let (name, wildcard) = &captures[0];
+    vec![RouteParam {
+        name: resolve_name(name, binding, ov),
+        ty: resolve_ty(name, ov, ty),
+        wildcard: *wildcard,
+    }]
+}
+
+/// Zips captures against a `Path<Struct>`'s own fields, matched by name --
+/// the struct's field names are the capture-to-param key, not the
+/// extractor's binding pattern, which only names the whole struct value.
+fn zip_struct(
+    captures: &[(String, bool)],
+    fields: &[Field],
+    ov: &Overrides,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<RouteParam> {
+    if captures.len() != fields.len() {
+        return arity_mismatch(captures.len(), fields.len(), loc, diags);
+    }
+    let mut by_ts_name: HashMap<&str, &Field> =
+        fields.iter().map(|f| (f.ts_name.as_str(), f)).collect();
+    let mut out = Vec::with_capacity(captures.len());
+    for (name, wildcard) in captures {
+        let Some(field) = by_ts_name.remove(name.as_str()) else {
+            return struct_name_mismatch(captures, fields, loc, diags);
+        };
+        out.push(RouteParam {
+            name: resolve_name(name, None, ov),
+            ty: resolve_ty(name, ov, field.ty.clone()),
+            wildcard: *wildcard,
+        });
+    }
+    out
+}
+
+/// Every capture widened to `string | number`, for a handler with no `Path`
+/// extractor at all -- legal axum, since an unread capture still matches at
+/// runtime, so this is one warning naming every capture rather than an
+/// error.
+fn widen_without_extractor(
+    captures: &[(String, bool)],
+    ov: &Overrides,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<RouteParam> {
+    if !captures.is_empty() {
+        let names: Vec<&str> = captures.iter().map(|(name, _)| name.as_str()).collect();
+        diags.push(
+            Diagnostic::warning(
+                loc.clone(),
+                format!(
+                    "path captures {} but the handler has no `Path` extractor; \
+                     treating {} as `string | number`",
+                    names.join(", "),
+                    if names.len() == 1 { "it" } else { "them" },
+                ),
+            )
+            .with_help(
+                "add a `Path<..>` parameter to the handler, or narrow the type with \
+                 a `params(name(type = \"...\"))` override",
+            ),
+        );
+    }
+    let widened = Ty::Union(vec![Ty::Prim(Prim::Str), Ty::Prim(Prim::Float)]);
+    captures
+        .iter()
+        .map(|(name, wildcard)| RouteParam {
+            name: resolve_name(name, None, ov),
+            ty: resolve_ty(name, ov, widened.clone()),
+            wildcard: *wildcard,
+        })
+        .collect()
+}
+
+/// The name a capture's [`RouteParam`] is emitted under: a `params(name(rename
+/// = ..))` override first, then the extractor binding's own identifier when
+/// it has one, then the template's capture name as the last resort --
+/// whichever wins is camelCased, since that's the casing a generated client
+/// call site expects regardless of what the Rust or template side wrote.
+fn resolve_name(capture: &str, binding: Option<&str>, ov: &Overrides) -> String {
+    let raw = ov.params.get(capture).and_then(|p| p.rename.as_deref()).or(binding).unwrap_or(capture);
+    RenameRule::Camel.apply_to_field(raw)
+}
+
+/// A capture's [`RouteParam::ty`]: a `params(name(type = ..))` override
+/// replaces whatever was inferred, verbatim and unlowered -- the override is
+/// author-supplied TypeScript text, not a Rust type to lower.
+fn resolve_ty(capture: &str, ov: &Overrides, inferred: Ty) -> Ty {
+    match ov.params.get(capture).and_then(|p| p.ty.as_deref()) {
+        Some(template) => Ty::Raw { template: template.to_string(), args: Vec::new() },
+        None => inferred,
+    }
+}
+
+/// One error naming both the template's capture count and the extractor's
+/// arity, dropping the route (an empty `Vec`) rather than emitting it
+/// half-formed -- axum itself rejects this mismatch at runtime.
+fn arity_mismatch(
+    captures: usize,
+    arity: usize,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<RouteParam> {
+    diags.push(
+        Diagnostic::new(
+            loc.clone(),
+            format!("path has {captures} capture(s) but `Path` extracts {arity}"),
+        )
+        .with_help("axum rejects a count mismatch at runtime as WrongNumberOfParameters"),
+    );
+    Vec::new()
+}
+
+/// A `Path<Struct>`'s fields don't match the template's captures by name --
+/// same arity, perhaps, but matching by name found a capture with no field to
+/// pair it with. Both sets are named so the mismatch is fixable without
+/// guessing which side is wrong.
+fn struct_name_mismatch(
+    captures: &[(String, bool)],
+    fields: &[Field],
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Vec<RouteParam> {
+    let capture_names: Vec<&str> = captures.iter().map(|(name, _)| name.as_str()).collect();
+    let field_names: Vec<&str> = fields.iter().map(|f| f.ts_name.as_str()).collect();
+    diags.push(
+        Diagnostic::new(
+            loc.clone(),
+            format!(
+                "path captures [{}] don't match `Path` struct fields [{}]",
+                capture_names.join(", "),
+                field_names.join(", "),
+            ),
+        )
+        .with_help("name the struct's fields the same as the path template's captures"),
+    );
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::axum::routes::ParamOverride;
 
     fn sig(src: &str) -> syn::Signature {
         syn::parse_str::<syn::ItemFn>(src).expect("fn must parse").sig
@@ -345,5 +612,95 @@ mod tests {
         let m = &d.iter().next().unwrap().message;
         assert!(m.contains("id") && m.contains("slug"), "both bindings must be named, got: {m}");
         assert_eq!(e.path.unwrap().binding, PathBinding::One("id".to_string()));
+    }
+
+    fn zip_diag(template: &str, handler: &str) -> (Vec<RouteParam>, Diagnostics) {
+        let mut d = Diagnostics::default();
+        let loc = SourceLoc { file: "h.rs".into(), line: 1 };
+        let segs = crate::axum::path::parse_template(template, &loc, &mut d).expect("template");
+        let ex = classify(&sig(handler), &Axum::new(), &LowerCtx::default(), &loc, &mut d);
+        let params = zip_params(
+            &segs,
+            ex.path.as_ref(),
+            &Overrides::default(),
+            &Registry::default(),
+            &LowerCtx::default(),
+            &loc,
+            &mut d,
+        );
+        (params, d)
+    }
+
+    fn zip(template: &str, handler: &str) -> Vec<RouteParam> {
+        let (p, d) = zip_diag(template, handler);
+        assert!(!d.has_errors(), "unexpected errors: {:?}", d.iter().collect::<Vec<_>>());
+        p
+    }
+
+    fn zip_with_override(template: &str, handler: &str, param: &str, ts: &str) -> Vec<RouteParam> {
+        let mut ov = Overrides::default();
+        ov.params.insert(param.to_string(), ParamOverride { ty: Some(ts.into()), rename: None });
+        let mut d = Diagnostics::default();
+        let loc = SourceLoc { file: "h.rs".into(), line: 1 };
+        let segs = crate::axum::path::parse_template(template, &loc, &mut d).expect("template");
+        let ex = classify(&sig(handler), &Axum::new(), &LowerCtx::default(), &loc, &mut d);
+        zip_params(&segs, ex.path.as_ref(), &ov, &Registry::default(), &LowerCtx::default(), &loc, &mut d)
+    }
+
+    #[test]
+    fn one_capture_and_one_scalar_path_zip_by_name() {
+        let p = zip("/a/{id}", "async fn h(Path(id): Path<i64>) {}");
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].name, "id");
+        assert!(matches!(p[0].ty, Ty::Prim(Prim::Int { .. })));
+    }
+
+    #[test]
+    fn a_tuple_path_zips_positionally_and_names_come_from_the_template() {
+        let p = zip("/a/{id}/b/{slug}", "async fn h(Path((a, b)): Path<(i64, String)>) {}");
+        assert_eq!(p.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), vec!["id", "slug"]);
+        assert!(matches!(p[1].ty, Ty::Prim(Prim::Str)));
+    }
+
+    #[test]
+    fn a_binding_name_wins_over_the_template_name() {
+        let p = zip("/a/{id}", "async fn h(Path(patient_id): Path<i64>) {}");
+        assert_eq!(p[0].name, "patientId");
+    }
+
+    #[test]
+    fn too_many_tuple_elements_for_the_template_is_an_error() {
+        let (p, d) = zip_diag("/a/{id}", "async fn h(Path((a, b)): Path<(i64, String)>) {}");
+        assert!(d.has_errors());
+        assert!(d.iter().next().unwrap().message.contains("1 capture"), "arity must be named");
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn too_few_tuple_elements_for_the_template_is_also_an_error() {
+        let (_, d) = zip_diag("/a/{id}/b/{slug}", "async fn h(Path(id): Path<i64>) {}");
+        assert!(d.has_errors());
+    }
+
+    #[test]
+    fn a_capture_with_no_path_extractor_widens_and_warns() {
+        let (p, d) = zip_diag("/a/{id}", "async fn h() {}");
+        assert!(!d.has_errors(), "legal axum must not fail the build");
+        assert_eq!(d.len(), 1);
+        assert_eq!(p[0].name, "id");
+        assert_eq!(p[0].ty, Ty::Union(vec![Ty::Prim(Prim::Str), Ty::Prim(Prim::Float)]));
+    }
+
+    #[test]
+    fn a_wildcard_capture_is_a_string_parameter() {
+        let p = zip("/a/{*rest}", "async fn h(Path(rest): Path<String>) {}");
+        assert!(p[0].wildcard);
+        assert_eq!(p[0].name, "rest");
+    }
+
+    #[test]
+    fn a_param_override_replaces_the_inferred_type() {
+        let p = zip_with_override("/a/{id}", "async fn h() {}", "id", "number");
+        assert!(matches!(&p[0].ty, Ty::Raw { template, .. } if template == "number"));
     }
 }
