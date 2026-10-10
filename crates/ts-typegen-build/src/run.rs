@@ -63,7 +63,8 @@ pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
         aliases: Default::default(),
     };
     let mut diags = Diagnostics::default();
-    let reg = scan_roots(cfg.scans(), &ctx, &mut diags);
+    let scan = scan_roots(cfg.scans(), &ctx, &mut diags);
+    let reg = &scan.registry;
     if reg.decls().is_empty() {
         diags.push(
             crate::diag::Diagnostic::warning(

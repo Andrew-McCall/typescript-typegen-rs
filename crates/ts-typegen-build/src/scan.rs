@@ -19,10 +19,26 @@ use crate::ir::{Registry, SourceLoc};
 use crate::lower::{LowerCtx, RawAlias, resolve_aliases};
 use crate::parse::{has_ts_derive, loc_of, parse_item, type_param_names};
 
+/// The result of a scan: every `#[derive(Ts)]` type, lowered into a
+/// [`Registry`], plus every `fn` item found along the way.
+pub struct ScanOutput {
+    pub registry: Registry,
+    pub fns: Vec<FnItem>,
+}
+
+/// A `fn` item found while walking, kept regardless of whether it looks like
+/// a handler -- relevance is decided later by discovery logic.
+pub struct FnItem {
+    pub item: syn::ItemFn,
+    pub module_path: String,
+    pub file: PathBuf,
+}
+
 /// Walks every root's `mod` tree, collecting every `#[derive(Ts)]` struct
-/// and enum into a [`Registry`]. `#[cfg(...)]` is not evaluated, so a type
-/// gated out for the current build still produces a binding.
-pub fn scan_roots(roots: &[PathBuf], ctx: &LowerCtx, diags: &mut Diagnostics) -> Registry {
+/// and enum into a [`Registry`], and every `fn` item into [`ScanOutput::fns`].
+/// `#[cfg(...)]` is not evaluated, so a type or fn gated out for the current
+/// build still produces a binding.
+pub fn scan_roots(roots: &[PathBuf], ctx: &LowerCtx, diags: &mut Diagnostics) -> ScanOutput {
     let mut collected = Collected::default();
     let mut seen = HashSet::new();
     for root in roots {
@@ -55,15 +71,16 @@ pub fn scan_roots(roots: &[PathBuf], ctx: &LowerCtx, diags: &mut Diagnostics) ->
             );
         }
     }
-    reg
+    ScanOutput { registry: reg, fns: collected.fns }
 }
 
-/// Every `#[derive(Ts)]` candidate and `type` alias found while walking, not
-/// yet parsed or lowered.
+/// Every `#[derive(Ts)]` candidate, `type` alias, and `fn` item found while
+/// walking, not yet parsed or lowered.
 #[derive(Default)]
 struct Collected {
     decls: Vec<Candidate>,
     aliases: HashMap<String, RawAlias>,
+    fns: Vec<FnItem>,
 }
 
 /// A struct or enum carrying `#[derive(Ts)]`, deferred until aliases are
@@ -183,6 +200,13 @@ fn walk_items(
                         }
                     }
                 }
+            }
+            syn::Item::Fn(f) => {
+                collected.fns.push(FnItem {
+                    item: f.clone(),
+                    module_path: module_path.to_string(),
+                    file: file.to_path_buf(),
+                });
             }
             _ => {}
         }
