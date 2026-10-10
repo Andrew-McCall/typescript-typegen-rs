@@ -146,3 +146,38 @@ fn check_mode_passes_when_output_matches() {
     write_all(&f, &Config::new().output(dir.path())).unwrap();
     assert!(write_all(&f, &Config::new().output(dir.path()).check(true)).is_ok());
 }
+
+#[test]
+fn a_nested_key_creates_its_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config::new().scan("src").output(dir.path().join("bindings"));
+    let mut nested_files = BTreeMap::new();
+    nested_files.insert(
+        "client/patientView.ts".to_string(),
+        format!("{MARKER}\nexport const patientView = 1;\n"),
+    );
+
+    let report = write_all(&nested_files, &cfg).expect("nested write must succeed");
+
+    assert_eq!(report.written, vec!["client/patientView.ts"]);
+    assert!(dir.path().join("bindings/client/patientView.ts").is_file());
+}
+
+#[test]
+fn a_stale_nested_generated_file_is_swept_but_a_handwritten_one_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("bindings");
+    let cfg = Config::new().scan("src").output(&out);
+    fs::create_dir_all(out.join("client")).unwrap();
+    fs::write(
+        out.join("client/ghost.ts"),
+        format!("{MARKER}\nexport const x = 1;\n"),
+    )
+    .unwrap();
+    fs::write(out.join("client/mine.ts"), "export const x = 1;\n").unwrap();
+
+    let report = write_all(&BTreeMap::new(), &cfg).unwrap();
+
+    assert_eq!(report.removed, vec!["client/ghost.ts"]);
+    assert!(out.join("client/mine.ts").is_file(), "hand-written file must survive");
+}
