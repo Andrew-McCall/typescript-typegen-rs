@@ -27,6 +27,9 @@
 
 pub use ts_typegen_macros::Ts;
 
+#[cfg(feature = "axum")]
+pub use ts_typegen_macros::ts_route;
+
 #[cfg(feature = "strict")]
 mod marker;
 #[cfg(feature = "strict")]
