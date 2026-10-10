@@ -20,6 +20,8 @@
 #![forbid(unsafe_code)]
 
 pub mod attrs;
+#[cfg(feature = "axum")]
+pub mod axum;
 pub mod config;
 pub mod diag;
 pub mod emit;

@@ -16,6 +16,10 @@ categories = [
     "encoding",
 ]
 
+[features]
+default = []
+axum = []
+
 [dependencies]
 syn.workspace = true
 proc-macro2.workspace = true
