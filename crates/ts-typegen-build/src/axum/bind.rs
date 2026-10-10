@@ -531,10 +531,182 @@ fn struct_name_mismatch(
     Vec::new()
 }
 
+/// Resolves a handler's response and error types.
+///
+/// An explicit `#[ts_route(response = "...")]` override wins outright.
+/// Otherwise the return type is unwrapped -- through `Result<T, E>`, then
+/// `Json<T>` and a `(StatusCode, T)` tuple -- down to a payload that's
+/// either void (`()` or a bare `StatusCode`) or named by its final path
+/// segment. A named payload resolves through a configured
+/// [`Axum::map_response`] mapping first, covering an `IntoResponse` type
+/// with no `Ts` derive of its own, or otherwise as a bare reference,
+/// trusting that the name is either already registered (e.g.
+/// `CreatedResponse`) or will resolve when the client is imported. A
+/// payload with no path segment at all -- an unannotated `impl
+/// IntoResponse` -- can't be named this way, and drops the whole route
+/// rather than guess.
+///
+/// `E`, present only when the return type was `Result<T, E>`, resolves the
+/// same way but never fails the route: unresolved, it falls back to a
+/// configured [`Axum::error_type`], and failing that, a bare guess at `E`'s
+/// own name.
+pub fn infer_response(
+    sig: &syn::Signature,
+    ov: &Overrides,
+    cfg: &Axum,
+    reg: &Registry,
+    ctx: &LowerCtx,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Option<(Ty, Option<Ty>)> {
+    let (body, error_ty) = match &sig.output {
+        syn::ReturnType::Default => (None, None),
+        syn::ReturnType::Type(_, ty) => {
+            let (ok, err) = split_result(ty);
+            (Some(ok), err)
+        }
+    };
+    let error = error_ty.as_ref().map(|e| resolve_error_arm(e, cfg, reg));
+
+    if let Some(s) = &ov.response {
+        return Some((response_override(s, ctx, loc, diags), error));
+    }
+
+    let Some(body) = body else {
+        return Some((Ty::Prim(Prim::Null), error));
+    };
+
+    match unwrap_response_body(&body) {
+        Unwrapped::Void => Some((Ty::Prim(Prim::Null), error)),
+        Unwrapped::Type(resolved) => match final_segment(&resolved) {
+            Some(name) => Some((resolve_named_response(&name, cfg), error)),
+            None => {
+                diags.push(unresolvable_response(loc));
+                None
+            }
+        },
+    }
+}
+
+/// An explicit `response = "..."` override: parsed as a Rust type and
+/// lowered the normal way, so `"Vec<PatientView>"` becomes an array of
+/// refs. A string that isn't valid Rust type syntax -- a TS union, say --
+/// is emitted verbatim instead of failing the route.
+fn response_override(s: &str, ctx: &LowerCtx, loc: &SourceLoc, diags: &mut Diagnostics) -> Ty {
+    match syn::parse_str::<syn::Type>(s) {
+        Ok(ty) => lower_type(&ty, ctx, loc, diags),
+        Err(_) => Ty::Raw { template: s.to_string(), args: Vec::new() },
+    }
+}
+
+/// Splits a `Result<T, E>` return type into `(T, Some(E))`. Any other type
+/// passes through unchanged, with no error arm.
+fn split_result(ty: &syn::Type) -> (syn::Type, Option<syn::Type>) {
+    let t = peel(ty);
+    if let syn::Type::Path(p) = t {
+        if let Some(seg) = p.path.segments.last() {
+            if seg.ident == "Result" {
+                if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
+                    let mut args = ab.args.iter().filter_map(|a| match a {
+                        syn::GenericArgument::Type(gt) => Some(gt.clone()),
+                        _ => None,
+                    });
+                    if let Some(ok) = args.next() {
+                        return (ok, args.next());
+                    }
+                }
+            }
+        }
+    }
+    (t.clone(), None)
+}
+
+/// What a response body unwraps to: void, with nothing further to resolve,
+/// or a type whose final path segment names the response.
+enum Unwrapped {
+    Void,
+    Type(Box<syn::Type>),
+}
+
+/// Unwraps `Json<T>` to `T`, and a `(StatusCode, T)` tuple to `T` -- itself
+/// unwrapped the same way, since it could in turn be `Json<T2>`. `()` or a
+/// bare `StatusCode`, at any point, is void.
+fn unwrap_response_body(ty: &syn::Type) -> Unwrapped {
+    let t = peel(ty);
+    match t {
+        syn::Type::Tuple(tup) if tup.elems.is_empty() => Unwrapped::Void,
+        syn::Type::Tuple(tup)
+            if tup.elems.len() == 2
+                && final_segment(&tup.elems[0]).as_deref() == Some("StatusCode") =>
+        {
+            unwrap_response_body(&tup.elems[1])
+        }
+        syn::Type::Path(p) => match p.path.segments.last().map(|s| s.ident.to_string()) {
+            Some(name) if name == "StatusCode" => Unwrapped::Void,
+            Some(name) if name == "Json" => match first_generic_arg(t) {
+                Some(inner) => unwrap_response_body(inner),
+                None => Unwrapped::Type(Box::new(t.clone())),
+            },
+            _ => Unwrapped::Type(Box::new(t.clone())),
+        },
+        _ => Unwrapped::Type(Box::new(t.clone())),
+    }
+}
+
+/// A response type resolved to a bare name: a configured
+/// [`Axum::map_response`] entry wins when there is one; otherwise the name
+/// is emitted as a reference, which is why `CreatedResponse` and friends
+/// resolve with no configuration at all -- they already `#[derive(Ts)]`,
+/// so the reference finds them downstream.
+fn resolve_named_response(name: &str, cfg: &Axum) -> Ty {
+    match cfg.response_map_for(name) {
+        Some(mapped) => Ty::Raw { template: mapped.to_string(), args: Vec::new() },
+        None => Ty::Ref { name: name.to_string(), args: Vec::new() },
+    }
+}
+
+/// The error arm's type, resolved the same way as the response, but never
+/// failing the route: a configured [`Axum::map_response`] entry, then a
+/// registered declaration, then a configured [`Axum::error_type`] -- and
+/// failing all of those, a bare guess at the error type's own name. An
+/// error body is uniform across an API far more often than a success body
+/// is, which is why the configured fallback is checked first.
+fn resolve_error_arm(e: &syn::Type, cfg: &Axum, reg: &Registry) -> Ty {
+    let Some(name) = final_segment(e) else {
+        return cfg
+            .error_type_name()
+            .map(|t| Ty::Raw { template: t.to_string(), args: Vec::new() })
+            .unwrap_or(Ty::Unknown);
+    };
+    if let Some(mapped) = cfg.response_map_for(&name) {
+        return Ty::Raw { template: mapped.to_string(), args: Vec::new() };
+    }
+    if reg.lookup(&name).is_some() {
+        return Ty::Ref { name, args: Vec::new() };
+    }
+    if let Some(configured) = cfg.error_type_name() {
+        return Ty::Raw { template: configured.to_string(), args: Vec::new() };
+    }
+    Ty::Ref { name, args: Vec::new() }
+}
+
+/// Raised when a response type bottoms out at something with no path
+/// segment at all, e.g. an unannotated `impl IntoResponse`: guessing
+/// `unknown` would force a cast at every call site, so there's no type to
+/// fall back to here.
+fn unresolvable_response(loc: &SourceLoc) -> Diagnostic {
+    Diagnostic::new(loc.clone(), "handler's response type cannot be derived from its return type")
+        .with_help(
+            "give it with #[ts_route(response = \"...\")], or map the type with \
+             .map_response(\"...\", \"...\")",
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::axum::routes::ParamOverride;
+    use crate::ir::Decl;
 
     fn sig(src: &str) -> syn::Signature {
         syn::parse_str::<syn::ItemFn>(src).expect("fn must parse").sig
@@ -702,5 +874,114 @@ mod tests {
     fn a_param_override_replaces_the_inferred_type() {
         let p = zip_with_override("/a/{id}", "async fn h() {}", "id", "number");
         assert!(matches!(&p[0].ty, Ty::Raw { template, .. } if template == "number"));
+    }
+
+    fn infer_cfg(
+        src: &str,
+        response_override: Option<&str>,
+        cfg: &Axum,
+        reg: &Registry,
+    ) -> (Option<(Ty, Option<Ty>)>, Diagnostics) {
+        let mut ov = Overrides::default();
+        ov.response = response_override.map(str::to_string);
+        let mut d = Diagnostics::default();
+        let loc = SourceLoc { file: "h.rs".into(), line: 1 };
+        let r = infer_response(&sig(src), &ov, cfg, reg, &LowerCtx::default(), &loc, &mut d);
+        (r, d)
+    }
+
+    fn infer(src: &str, response_override: Option<&str>) -> (Option<(Ty, Option<Ty>)>, Diagnostics) {
+        infer_cfg(src, response_override, &Axum::new(), &Registry::default())
+    }
+
+    fn infer_with_registry(src: &str, ts_names: &[&str]) -> (Option<(Ty, Option<Ty>)>, Diagnostics) {
+        let mut reg = Registry::default();
+        for name in ts_names {
+            reg.insert(unit_decl(name)).unwrap();
+        }
+        infer_cfg(src, None, &Axum::new(), &reg)
+    }
+
+    fn infer_mapped(src: &str, rust: &str, ts: &str) -> (Option<(Ty, Option<Ty>)>, Diagnostics) {
+        infer_cfg(src, None, &Axum::new().map_response(rust, ts), &Registry::default())
+    }
+
+    fn infer_with_error_type(src: &str, ts: &str) -> (Option<(Ty, Option<Ty>)>, Diagnostics) {
+        infer_cfg(src, None, &Axum::new().error_type(ts), &Registry::default())
+    }
+
+    fn unit_decl(ts_name: &str) -> Decl {
+        Decl {
+            rust_path: format!("crate::{ts_name}"),
+            ts_name: ts_name.to_string(),
+            docs: vec![],
+            generics: vec![],
+            body: Body::Unit,
+            loc: SourceLoc { file: "r.rs".into(), line: 1 },
+        }
+    }
+
+    #[test]
+    fn an_attribute_response_wins_over_the_return_type() {
+        let (r, _) = infer(r#"async fn h() -> Result<Json<A>, ApiError> {}"#, Some("Vec<PatientView>"));
+        assert!(matches!(&r.unwrap().0, Ty::Array(_)));
+    }
+
+    #[test]
+    fn result_and_json_are_unwrapped_and_the_error_arm_is_kept() {
+        let (r, _) = infer("async fn h() -> Result<Json<PatientView>, ApiError> {}", None);
+        let (resp, err) = r.unwrap();
+        assert!(matches!(&resp, Ty::Ref { name, .. } if name == "PatientView"));
+        assert!(err.is_some(), "the error arm must be typed");
+    }
+
+    #[test]
+    fn a_status_code_tuple_unwraps_to_the_json_payload() {
+        let (r, _) = infer("async fn h() -> (StatusCode, Json<PatientView>) {}", None);
+        assert!(matches!(&r.unwrap().0, Ty::Ref { name, .. } if name == "PatientView"));
+    }
+
+    #[test]
+    fn unit_and_status_code_are_void() {
+        for src in ["async fn h() -> Result<(), ApiError> {}", "async fn h() -> Result<StatusCode, ApiError> {}"] {
+            let (r, _) = infer(src, None);
+            assert_eq!(r.unwrap().0, Ty::Prim(Prim::Null));
+        }
+    }
+
+    #[test]
+    fn a_registry_type_resolves_without_configuration() {
+        let (r, d) = infer_with_registry(
+            "async fn h() -> Result<CreatedResponse, ApiError> {}",
+            &["CreatedResponse"],
+        );
+        assert!(!d.has_errors());
+        assert!(matches!(&r.unwrap().0, Ty::Ref { name, .. } if name == "CreatedResponse"));
+    }
+
+    #[test]
+    fn a_mapped_response_covers_a_type_with_no_ts_derive() {
+        let (r, d) = infer_mapped("async fn h() -> Result<FileResponse, ApiError> {}", "FileResponse", "Blob");
+        assert!(!d.has_errors());
+        assert!(matches!(&r.unwrap().0, Ty::Raw { template, .. } if template == "Blob"));
+    }
+
+    #[test]
+    fn impl_into_response_without_an_annotation_is_an_error() {
+        let (r, d) = infer("async fn h() -> Result<impl IntoResponse, ApiError> {}", None);
+        assert!(r.is_none());
+        assert!(d.has_errors());
+        let h = d.iter().next().unwrap().help.as_deref().unwrap_or_default();
+        assert!(h.contains("response"), "help must point at the override: {h}");
+    }
+
+    #[test]
+    fn an_unresolvable_error_arm_falls_back_to_the_configured_error_type() {
+        let (r, d) = infer_with_error_type(
+            "async fn h() -> Result<Json<A>, SomethingOpaque> {}",
+            "ApiErrorBody",
+        );
+        assert!(!d.has_errors(), "an error body must not fail the build");
+        assert!(matches!(&r.unwrap().1.unwrap(), Ty::Raw { template, .. } if template == "ApiErrorBody"));
     }
 }
