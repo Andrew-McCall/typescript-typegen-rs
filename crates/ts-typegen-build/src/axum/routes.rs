@@ -105,13 +105,13 @@ fn apply_meta(
 
     if key == route_attr.path_key_name() {
         if let Some(v) = literal_value(meta) {
-            fact.path = Some(v);
+            set_once(&mut fact.path, "path", v, loc, diags);
         }
         return;
     }
     if key == route_attr.method_key_name() {
         if let Some(v) = literal_value(meta) {
-            fact.method = Some(v);
+            set_once(&mut fact.method, "method", v, loc, diags);
         }
         return;
     }
@@ -151,7 +151,7 @@ fn apply_meta(
                 .and_then(|v| v.parse::<syn::LitBool>().ok())
                 .map(|b| b.value)
                 .unwrap_or(true);
-            fact.overrides.prefix = Some(on);
+            set_once(&mut fact.overrides.prefix, "prefix", on, loc, diags);
         }
         "params" => {
             let _ = meta.parse_nested_meta(|param_meta| {
@@ -234,17 +234,11 @@ fn value_of(meta: &syn::meta::ParseNestedMeta<'_>) -> Option<String> {
     meta.path.get_ident().map(|i| i.to_string())
 }
 
-fn set_once(
-    slot: &mut Option<String>,
-    key: &str,
-    value: String,
-    loc: &SourceLoc,
-    diags: &mut Diagnostics,
-) {
+fn set_once<T>(slot: &mut Option<T>, key: &str, value: T, loc: &SourceLoc, diags: &mut Diagnostics) {
     if slot.is_some() {
         diags.push(
             Diagnostic::new(loc.clone(), format!("`{key}` is overridden twice on this route"))
-                .with_help("give it once, either as `key = \"...\"` or as `key(type = \"...\")`"),
+                .with_help("a route can only set this once; remove the duplicate"),
         );
         return;
     }
