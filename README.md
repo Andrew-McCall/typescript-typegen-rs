@@ -270,8 +270,8 @@ spell them out instead when you'd rather not depend on that:
 async fn get_patient(Path(id): Path<i64>) -> Json<PatientView> { ... }
 ```
 
-Every override piece — `response`, `request` (an alias for `body`), `query`,
-`params` — takes either a flat shorthand or a nested form:
+`response` and `request` (an alias for `body`) each take either a flat
+shorthand or a nested form:
 
 ```rust
 #[ts_route(response = "Blob")]
@@ -280,9 +280,14 @@ Every override piece — `response`, `request` (an alias for `body`), `query`,
 
 Giving both spellings for the same piece is a build error, not a precedence
 rule — there's no reading of `response = "A", response(type = "B")` that
-isn't a mistake. `skip` hides a route entirely; `rename = "fetchPatient"`
-overrides the generated function name; `prefix = false` opts one route out
-of a configured `.prefix(...)`.
+isn't a mistake.
+
+`query_key = "filters"` is flat only, and renames the argument-object key a
+query extractor uses. `params(id(type = "number"))` is always nested — there
+is no flat form — and overrides a path capture's inferred type, or, with
+`params(id(rename = "..."))`, the name it's exposed under. `skip` hides a
+route entirely; `fn_name = "fetchPatient"` overrides the generated function
+name; `prefix = false` opts one route out of a configured `.prefix(...)`.
 
 ### Argument objects
 
@@ -317,7 +322,8 @@ value instead of needing to know to catch an exception. You supply one
 ```ts
 const sender: Sender = {
   async send(req) {
-    const res = await fetch(req.path, {
+    const qs = req.query ? `?${new URLSearchParams(req.query as Record<string, string>)}` : "";
+    const res = await fetch(req.path + qs, {
       method: req.method,
       body: req.body ? JSON.stringify(req.body) : undefined,
     });
