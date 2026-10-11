@@ -384,7 +384,12 @@ fn render_route_member(route: &Route, cfg: &Config, refs: &mut BTreeSet<String>,
     out.push_str(&format!("{indent}    route: \"{}\",\n", route.path));
     out.push_str(&format!("{indent}    path: {path_expr},\n"));
     if route.query.is_some() {
-        out.push_str(&format!("{indent}    query: query,\n"));
+        // A concrete query type (e.g. `CheckoutQuery`) has no index signature, so it
+        // isn't assignable -- or even directly castable -- to `Record<string, unknown>`
+        // without going through `unknown` first.
+        out.push_str(&format!(
+            "{indent}    query: query as unknown as Record<string, unknown>,\n"
+        ));
     }
     if route.body.is_some() {
         out.push_str(&format!("{indent}    body: body,\n"));
@@ -578,6 +583,20 @@ mod tests {
         assert!(m.contains("getPatient: ({ id }: { id: number }, opts?: O) =>"));
         assert!(m.contains("path: `/v2/patient/view/${id}`"), "got: {m}");
         assert!(m.contains(r#"route: "/v2/patient/view/{id}""#));
+    }
+
+    #[test]
+    fn a_query_argument_is_cast_through_unknown_to_satisfy_the_sender_contract() {
+        // `RouteRequest.query` is `Record<string, unknown>`; a concrete query type
+        // like `Filter` has no index signature, so TypeScript rejects both a plain
+        // assignment and a single `as` between them -- only going through `unknown`
+        // first typechecks.
+        let files = render_client(&registry_with_csv_query(), &Config::new());
+        let m = &files["client/search.ts"];
+        assert!(
+            m.contains("query: query as unknown as Record<string, unknown>,"),
+            "got: {m}"
+        );
     }
 
     #[test]

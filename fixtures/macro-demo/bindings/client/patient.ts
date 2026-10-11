@@ -2,6 +2,7 @@
 import type { Sender } from "../sender";
 import type { CreatedResponse } from "../CreatedResponse";
 import type { PatientView } from "../PatientView";
+import type { SearchQuery } from "../SearchQuery";
 
 export const patient = <O,>(s: Sender<O>) => ({
   getPatient: ({ id }: { id: number }, opts?: O) =>
@@ -15,5 +16,19 @@ export const patient = <O,>(s: Sender<O>) => ({
       method: "POST",
       route: "/v2/patient",
       path: `/v2/patient`,
+    }, opts),
+  searchPatients: ({ query }: { query: SearchQuery }, opts?: O) =>
+    s.send<PatientView[], unknown>({
+      method: "GET",
+      route: "/v2/patient/search",
+      path: `/v2/patient/search`,
+      query: query as unknown as Record<string, unknown>,
+    }, opts),
+  updatePatient: ({ id, body }: { id: number; body: PatientView }, opts?: O) =>
+    s.send<PatientView, unknown>({
+      method: "PUT",
+      route: "/v2/patient/{id}",
+      path: `/v2/patient/${id}`,
+      body: body,
     }, opts),
 });

@@ -24,4 +24,17 @@ type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ?
 
   // @ts-expect-error a misspelled argument key must not type-check
   await api.patient.getPatient({ idd: 1 });
+
+  // A concrete query type has no index signature; this must still type-check
+  // against `RouteRequest.query: Record<string, unknown>`.
+  const searched = await api.patient.searchPatients({ query: { name: "a" } });
+  type _SearchedNarrowed = Expect<Equal<typeof searched, RouteResult<PatientView[], unknown>>>;
+
+  // `update_patient`'s `Request = "PatientView"` override must be the body type
+  // the client actually takes -- not its literal (unexported) wire-form extractor type.
+  const updated = await api.patient.updatePatient({ id: 1, body: { id: 1, name: "a" } });
+  type _UpdatedNarrowed = Expect<Equal<typeof updated, RouteResult<PatientView, unknown>>>;
+
+  // @ts-expect-error a field outside the override type must not type-check
+  await api.patient.updatePatient({ id: 1, body: { id: 1, name: "a", extra: true } });
 })();

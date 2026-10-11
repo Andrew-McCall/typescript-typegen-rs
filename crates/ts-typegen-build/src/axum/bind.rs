@@ -569,7 +569,7 @@ pub fn infer_response(
     let error = error_ty.as_ref().map(|e| resolve_error_arm(e, cfg, reg));
 
     if let Some(s) = &ov.response {
-        return Some((response_override(s, ctx, loc, diags), error));
+        return Some((type_override(s, ctx, loc, diags), error));
     }
 
     let Some(body) = body else {
@@ -588,11 +588,11 @@ pub fn infer_response(
     }
 }
 
-/// An explicit `response = "..."` override: parsed as a Rust type and
-/// lowered the normal way, so `"Vec<PatientView>"` becomes an array of
-/// refs. A string that isn't valid Rust type syntax -- a TS union, say --
-/// is emitted verbatim instead of failing the route.
-fn response_override(s: &str, ctx: &LowerCtx, loc: &SourceLoc, diags: &mut Diagnostics) -> Ty {
+/// An explicit `response = "..."` or `request = "..."` override: parsed as a
+/// Rust type and lowered the normal way, so `"Vec<PatientView>"` becomes an
+/// array of refs. A string that isn't valid Rust type syntax -- a TS union,
+/// say -- is emitted verbatim instead of failing the route.
+pub(crate) fn type_override(s: &str, ctx: &LowerCtx, loc: &SourceLoc, diags: &mut Diagnostics) -> Ty {
     match syn::parse_str::<syn::Type>(s) {
         Ok(ty) => lower_type(&ty, ctx, loc, diags),
         Err(_) => Ty::Raw { template: s.to_string(), args: Vec::new() },

@@ -16,7 +16,7 @@ use crate::axum::path;
 use crate::axum::router::facts_from_routers;
 use crate::config::Config;
 use crate::diag::{Diagnostic, Diagnostics};
-use crate::ir::{Body, Method, Registry, Route, RouteParam, SourceLoc, Ty};
+use crate::ir::{Body, Method, Registry, Route, RouteBody, RouteParam, SourceLoc, Ty};
 use crate::lower::LowerCtx;
 use crate::parse::loc_of;
 use crate::scan::FnItem;
@@ -375,6 +375,20 @@ pub fn collect_routes(
 
         let query_arrays = query_arrays_for(&extracted, axum, reg, &fact.loc, diags);
 
+        // An explicit `request = "..."` names the type callers should send, which is
+        // usually the real domain type (`NewPatient`) rather than the literal body
+        // extractor's type (a validation-friendly wire form like `NewPatientSerde`,
+        // often invisible to the source scan the same way `#[ts_route]`'s own
+        // generated newtypes are) -- same override the response gets, applied to
+        // whichever typed body extractor was actually found, if any.
+        let body = extracted.body.map(|(_, b)| b);
+        let body = match (&fact.overrides.body, body) {
+            (Some(s), Some(RouteBody::Typed(_))) => {
+                Some(RouteBody::Typed(bind::type_override(s, ctx, &fact.loc, diags)))
+            }
+            (_, b) => b,
+        };
+
         let ts_name = fact
             .overrides
             .fn_name
@@ -408,7 +422,7 @@ pub fn collect_routes(
             group,
             params,
             query: extracted.query.map(|(_, ty)| ty),
-            body: extracted.body.map(|(_, body)| body),
+            body,
             response,
             error,
             query_arrays,
@@ -934,6 +948,37 @@ pub async fn proxy(Path(method): Path<String>) -> Json<PatientView> { todo!() }"
         assert!(routes.is_empty());
         assert!(d.has_errors(), "`method` is the reserved key on an ANY route");
         assert!(d.iter().next().unwrap().help.as_deref().unwrap().contains("rename"));
+    }
+
+    #[test]
+    fn a_request_override_replaces_the_bodys_literal_wire_type() {
+        // `NewPatientSerde` stands in for a validation-friendly wire form a macro
+        // generates at expansion time -- invisible to the source scan, and not
+        // `#[derive(Ts)]`'d here either, on purpose: the override must win without
+        // needing the literal extractor type to resolve to anything.
+        let src = r#"#[derive(ts_typegen::Ts)]
+pub struct NewPatient { pub name: String }
+
+#[ts_route(path = "/patient", method = "POST", request = "NewPatient")]
+pub async fn create_patient(Json(p): Json<NewPatientSerde>) -> Json<NewPatient> { todo!() }"#;
+        let r = only(&[("handlers/p/create_patient.rs", src)], modules("handlers"));
+        match r.body {
+            Some(RouteBody::Typed(Ty::Ref { name, .. })) => assert_eq!(name, "NewPatient"),
+            other => panic!("expected a Typed(Ref(\"NewPatient\")) body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_override_does_not_apply_to_a_fixed_body_shape() {
+        // `request = "..."` names a JSON/Form payload's type; it has nothing to say
+        // about a `Multipart` body, which has no type to override in the first place.
+        let src = r#"#[derive(ts_typegen::Ts)]
+pub struct NewPatient { pub name: String }
+
+#[ts_route(path = "/upload", method = "POST", request = "NewPatient")]
+pub async fn upload(m: Multipart) -> Json<NewPatient> { todo!() }"#;
+        let r = only(&[("handlers/u/upload.rs", src)], modules("handlers"));
+        assert!(matches!(r.body, Some(RouteBody::FormData)));
     }
 
     #[test]
