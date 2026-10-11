@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 
 use crate::attrs::RenameRule;
 use crate::axum::bind;
-use crate::axum::config::{Axum, Client, QueryArrays, RouteAttr};
+use crate::axum::config::{Axum, Client, Discover, QueryArrays, RouteAttr};
 use crate::axum::path;
+use crate::axum::router::{facts_from_routers, module_last_segment};
 use crate::config::Config;
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::ir::{Body, Method, Registry, Route, RouteParam, SourceLoc, Ty};
@@ -66,8 +67,13 @@ pub struct RouteFact {
     pub path: Option<String>,
     /// Every override carried alongside path and method.
     pub overrides: Overrides,
-    /// Where the attribute was found.
+    /// Where the attribute, or the router registration, was found.
     pub loc: SourceLoc,
+    /// The resolved handler's bare name and enclosing module path, set only
+    /// on a router-sourced fact -- an attribute-sourced fact's handler is
+    /// already the `FnItem` [`fact_from_attrs`] was called on, so it never
+    /// needs to name it separately.
+    pub handler: Option<(String, String)>,
 }
 
 /// Reads route metadata off `f`, trying each of `cfg`'s configured
@@ -88,6 +94,7 @@ pub fn fact_from_attrs(f: &FnItem, cfg: &Axum, diags: &mut Diagnostics) -> Optio
             path: None,
             overrides: Overrides::default(),
             loc: loc.clone(),
+            handler: None,
         };
         for attr in matches {
             let _ = attr.parse_nested_meta(|meta| {
@@ -254,17 +261,25 @@ fn set_once<T>(slot: &mut Option<T>, key: &str, value: T, loc: &SourceLoc, diags
 /// Turns every discovered `FnItem` into a [`Route`] and inserts it into
 /// `reg`.
 ///
-/// Each fn goes through, in order: reading its [`RouteFact`] (skipping it
-/// entirely when there is none, or when it's marked `skip`); computing its
-/// `group` from its file's directory; resolving its declared path and
-/// method, with the configured prefix applied; classifying its extractors
-/// and zipping its path captures; excluding a streaming response with a
-/// warning instead of inferring one; inferring its response and error
-/// types; checking the `method` key reservation on an `any` route;
-/// recording its query-array convention; and finally building and
-/// inserting the `Route`, diagnosing a clash with either an existing route
-/// of the same method and path, or an existing route with the same name in
-/// the same group.
+/// Each fn's [`RouteFact`] comes from up to two independent sources: its own
+/// attributes, and (when [`Axum::routers_enabled`]) a fact
+/// [`facts_from_routers`] resolved for it from a real `Router` builder
+/// chain elsewhere in the scan. With both, [`merge_router_fact`] fills in
+/// whichever piece the attribute left unset and errors on a genuine
+/// disagreement; with only the router's, it is used on its own only under
+/// [`Discover::All`] -- [`Discover::Annotated`] still requires the
+/// attribute to select what's exposed. A fn with neither is skipped, as is
+/// one whose fact is marked `skip`.
+///
+/// From there, each fn goes through, in order: computing its `group` from
+/// its file's directory; resolving its declared path and method, with the
+/// configured prefix applied; classifying its extractors and zipping its
+/// path captures; excluding a streaming response with a warning instead of
+/// inferring one; inferring its response and error types; checking the
+/// `method` key reservation on an `any` route; recording its query-array
+/// convention; and finally building and inserting the `Route`, diagnosing a
+/// clash with either an existing route of the same method and path, or an
+/// existing route with the same name in the same group.
 pub fn collect_routes(
     fns: &[FnItem],
     reg: &mut Registry,
@@ -273,17 +288,45 @@ pub fn collect_routes(
     diags: &mut Diagnostics,
 ) {
     let axum = cfg.axum_config().expect("axum configured");
+    let router_facts =
+        if axum.routers_enabled() { facts_from_routers(fns, axum, diags) } else { Vec::new() };
     let mut claimed: HashMap<(Vec<String>, String), SourceLoc> = HashMap::new();
 
     for f in fns {
-        let Some(fact) = fact_from_attrs(f, axum, diags) else { continue };
+        let attr_fact = fact_from_attrs(f, axum, diags);
+        let router_fact = router_facts.iter().find(|rf| handler_matches(rf, f));
+
+        let fact = match (attr_fact, router_fact) {
+            (None, None) => continue,
+            (None, Some(rf)) if axum.discovery() == Discover::All => rf.clone(),
+            (None, Some(_)) => continue,
+            (Some(af), None) => af,
+            (Some(af), Some(rf)) => match merge_router_fact(af, rf, diags) {
+                Some(merged) => merged,
+                None => continue,
+            },
+        };
         if fact.overrides.skip {
             continue;
         }
 
         let Some(group) = route_group(&f.file, axum, cfg.scans(), &fact.loc, diags) else { continue };
 
-        let (Some(declared_path), Some(method_str)) = (&fact.path, &fact.method) else { continue };
+        let (Some(declared_path), Some(method_str)) = (&fact.path, &fact.method) else {
+            if axum.routers_enabled() {
+                diags.push(
+                    Diagnostic::new(
+                        fact.loc.clone(),
+                        format!("`{}` has no path or method to build a route from", f.item.sig.ident),
+                    )
+                    .with_help(
+                        "give #[ts_route] its own path and method, or register this handler \
+                         in a router chain scanned via .routers(true)",
+                    ),
+                );
+            }
+            continue;
+        };
         let Some(method) = parse_method(method_str) else {
             diags.push(Diagnostic::new(
                 fact.loc.clone(),
@@ -393,6 +436,55 @@ pub fn collect_routes(
             );
         }
     }
+}
+
+/// Whether a router-sourced fact's resolved handler identity names `f`: its
+/// bare fn name, and its enclosing module's own last segment -- the same
+/// comparison [`crate::axum::router`] uses to decide which scanned `fn` a
+/// `.route(...)` handler reference means.
+fn handler_matches(rf: &RouteFact, f: &FnItem) -> bool {
+    let Some((name, module)) = &rf.handler else { return false };
+    f.item.sig.ident == name.as_str() && module_last_segment(&f.module_path) == *module
+}
+
+/// Combines an attribute fact with the router-sourced fact independently
+/// resolved for the same handler: a piece missing from the attribute (most
+/// often its path and method, on a bare `#[ts_route]`) is filled in from the
+/// router; a piece both sides declare is kept only when they agree. Two
+/// sources naming different methods or paths for the same handler is an
+/// error naming both sites -- this drift check is the reason to run both
+/// sources at all, so it is treated the same as any other fatal mismatch:
+/// the route is dropped (`None`) rather than guessing which side is right.
+fn merge_router_fact(mut attr: RouteFact, router: &RouteFact, diags: &mut Diagnostics) -> Option<RouteFact> {
+    let mut conflict = None;
+
+    match (&attr.method, &router.method) {
+        (Some(a), Some(r)) if !a.eq_ignore_ascii_case(r) => conflict = Some(("method", a.clone(), r.clone())),
+        (None, Some(r)) => attr.method = Some(r.clone()),
+        _ => {}
+    }
+    match (&attr.path, &router.path) {
+        (Some(a), Some(r)) if a.trim_matches('/') != r.trim_matches('/') => {
+            conflict = conflict.or(Some(("path", a.clone(), r.clone())))
+        }
+        (None, Some(r)) => attr.path = Some(r.clone()),
+        _ => {}
+    }
+
+    if let Some((field, a, r)) = conflict {
+        diags.push(
+            Diagnostic::new(
+                attr.loc.clone(),
+                format!(
+                    "`{field}` disagrees between the #[ts_route] attribute (`{a}`) and the \
+                     router registration (`{r}`)"
+                ),
+            )
+            .with_help(format!("also registered at {}:{}", router.loc.file.display(), router.loc.line)),
+        );
+        return None;
+    }
+    Some(attr)
 }
 
 /// The HTTP method an attribute's `method = "..."` value names, matched
