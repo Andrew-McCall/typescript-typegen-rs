@@ -288,7 +288,13 @@ fn emit_variant(v: &Variant, repr: &EnumRepr, cfg: &Config) -> String {
                 }
                 format!("{{ {} }}", parts.join("; "))
             }
-            // Diagnosed during parsing; render the tag alone rather than a lie.
+            // A newtype over a map-shaped type is exactly what serde requires for this
+            // representation to work at all: the tag object and the wrapped type's own
+            // fields serialize side by side, so render the same intersection.
+            VariantKind::Newtype(t) if matches!(t, Ty::Ref { .. } | Ty::Object(_) | Ty::Record { .. }) => {
+                format!("({{ {key}: {tag} }} & {})", emit_ty(t, cfg))
+            }
+            // Diagnosed during parsing as an error; render the tag alone rather than a lie.
             VariantKind::Newtype(_) | VariantKind::Tuple(_) => format!("{{ {key}: {tag} }}"),
         },
         EnumRepr::Adjacent { tag: key, content } => {
@@ -660,6 +666,26 @@ mod enum_tests {
         assert_eq!(
             emit_decl(&d, &Config::new()),
             "export type X =\n  | { t: \"A\" }\n  | { t: \"B\"; x: boolean };\n"
+        );
+    }
+
+    #[test]
+    fn internally_tagged_enum_merges_a_newtype_over_a_ref_type() {
+        // `SelfRegister(SelfRegisterRequest)` under `#[serde(tag = "mode")]` serializes by
+        // merging the tag into whatever fields `SelfRegisterRequest` itself has -- that's
+        // what makes the representation valid for a newtype variant at all, per
+        // `internally_tagged_non_map_newtype_is_an_error` in parse.rs. The two sides must
+        // render as an intersection, not drop the wrapped type like a Tuple variant would.
+        let d = enum_decl(
+            EnumRepr::Internal { tag: "mode".into() },
+            vec![variant(
+                "SelfRegister",
+                VariantKind::Newtype(Ty::Ref { name: "SelfRegisterRequest".into(), args: vec![] }),
+            )],
+        );
+        assert_eq!(
+            emit_decl(&d, &Config::new()),
+            "export type X = ({ mode: \"SelfRegister\" } & SelfRegisterRequest);\n"
         );
     }
 
