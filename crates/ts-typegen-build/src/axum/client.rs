@@ -9,7 +9,7 @@ use crate::axum::path::{self, Segment};
 use crate::config::Config;
 use crate::diag::Diagnostics;
 use crate::emit::emit_ty;
-use crate::ir::{Field, Method, Prim, Registry, Route, RouteBody, SourceLoc, Ty};
+use crate::ir::{Field, Method, Prim, Registry, Route, RouteBody, RouteParam, SourceLoc, Ty};
 use crate::render::MARKER;
 
 /// Mirrors [`crate::render`]'s private `banner`: the marker line plus any
@@ -374,7 +374,7 @@ fn render_route_member(route: &Route, cfg: &Config, refs: &mut BTreeSet<String>,
     } else {
         format!("\"{}\"", route.method.as_str())
     };
-    let path_expr = render_path_literal(&route.path);
+    let path_expr = render_path_literal(&route.path, &route.params);
 
     let mut out = format!(
         "{indent}{}: ({arg_list}opts?: O) =>\n{indent}  s.send<{response}, {error}>({{\n",
@@ -430,21 +430,27 @@ fn body_ty(body: &RouteBody) -> Ty {
 /// The client call's `path:` value: a backtick TS template literal built by
 /// walking `route_path`'s parsed segments -- a literal contributes its
 /// [`path::escape_ts_literal`]-escaped text, a capture contributes
-/// `${name}` using the capture's own name, matching what the argument object
-/// destructures. A route whose path fails to re-parse here -- never true for
-/// one that passed through route discovery, only reachable from a
-/// hand-built `Route` bypassing it -- falls back to treating the whole
-/// string as one literal segment, so it still renders instead of panicking.
-fn render_path_literal(route_path: &str) -> String {
+/// `${name}`, zipped positionally against `params` rather than read off the
+/// template itself: a `Path<Struct>` or a renamed binding gives a capture a
+/// JS-facing name that differs from its raw template text, and that
+/// resolved name is what the argument object actually destructures. Route
+/// assembly only ever produces a `Route` with as many `params` as the
+/// template has captures, so the zip always lines up. A route whose path
+/// fails to re-parse here -- never true for one that passed through route
+/// discovery, only reachable from a hand-built `Route` bypassing it --
+/// falls back to treating the whole string as one literal segment, so it
+/// still renders instead of panicking.
+fn render_path_literal(route_path: &str, params: &[RouteParam]) -> String {
     let loc = SourceLoc { file: PathBuf::new(), line: 0 };
     let mut diags = Diagnostics::default();
     let segs = path::parse_template(route_path, &loc, &mut diags)
         .unwrap_or_else(|| vec![Segment::Literal(route_path.to_string())]);
+    let mut names = params.iter().map(|p| p.name.as_str());
     let parts: Vec<String> = segs
         .iter()
         .map(|seg| match seg {
             Segment::Literal(text) => path::escape_ts_literal(text),
-            Segment::Capture { name, .. } => format!("${{{name}}}"),
+            Segment::Capture { .. } => format!("${{{}}}", names.next().unwrap_or_default()),
         })
         .collect();
     format!("`{}`", parts.join("/"))
@@ -572,6 +578,21 @@ mod tests {
         assert!(m.contains("getPatient: ({ id }: { id: number }, opts?: O) =>"));
         assert!(m.contains("path: `/v2/patient/view/${id}`"), "got: {m}");
         assert!(m.contains(r#"route: "/v2/patient/view/{id}""#));
+    }
+
+    #[test]
+    fn a_renamed_capture_interpolates_its_resolved_name_not_the_template_text() {
+        let mut r = route(Method::Get, "/v2/order/{order_id}", &["order"], "getOrder");
+        r.params = vec![RouteParam {
+            name: "orderId".into(),
+            ty: Ty::Prim(Prim::Int { bits: 64, signed: true }),
+            wildcard: false,
+        }];
+        r.response = Ty::Ref { name: "OrderView".into(), args: vec![] };
+        let files = render_client(&registry_of(vec![r]), &Config::new());
+        let m = &files["client/order.ts"];
+        assert!(m.contains("getOrder: ({ orderId }: { orderId: number }, opts?: O) =>"));
+        assert!(m.contains("path: `/v2/order/${orderId}`"), "got: {m}");
     }
 
     #[test]
