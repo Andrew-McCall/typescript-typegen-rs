@@ -344,7 +344,11 @@ pub fn collect_routes(
             .clone()
             .unwrap_or_else(|| RenameRule::Camel.apply_to_field(&f.item.sig.ident.to_string()));
 
-        let key = (group.clone(), ts_name.clone());
+        let key_group = match axum.client_style() {
+            Client::Flat => Vec::new(),
+            _ => group.clone(),
+        };
+        let key = (key_group, ts_name.clone());
         if let Some(existing) = claimed.get(&key) {
             diags.push(
                 Diagnostic::new(
@@ -768,6 +772,18 @@ pub async fn get_patient(Path(id): Path<i64>) -> Json<PatientView> { todo!() }"#
         let (_, d, _dir) = collect(
             &[("handlers/p/a.rs", GET_PATIENT), ("handlers/p/b.rs", other)],
             modules("handlers"),
+        );
+        assert!(d.has_errors());
+        assert!(d.iter().any(|x| x.help.as_deref().unwrap_or_default().contains("rename")));
+    }
+
+    #[test]
+    fn two_handlers_colliding_under_flat_mode_is_also_an_error() {
+        let other = r#"#[ts_route(path = "/other/{id}", method = "GET")]
+pub async fn get_patient(Path(id): Path<i64>) -> Json<PatientView> { todo!() }"#;
+        let (_, d, _dir) = collect(
+            &[("handlers/a/x.rs", GET_PATIENT), ("handlers/b/y.rs", other)],
+            Axum::new().client(Client::Flat),
         );
         assert!(d.has_errors());
         assert!(d.iter().any(|x| x.help.as_deref().unwrap_or_default().contains("rename")));
