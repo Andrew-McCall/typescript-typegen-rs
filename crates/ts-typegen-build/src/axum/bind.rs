@@ -250,7 +250,7 @@ fn unwrap_option_or_result(ty: &syn::Type) -> &syn::Type {
 }
 
 /// The type's final path segment's name, e.g. `Json` for `Json<NewScheme>`.
-fn final_segment(ty: &syn::Type) -> Option<String> {
+pub(crate) fn final_segment(ty: &syn::Type) -> Option<String> {
     match peel(ty) {
         syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
         _ => None,
@@ -601,7 +601,7 @@ fn response_override(s: &str, ctx: &LowerCtx, loc: &SourceLoc, diags: &mut Diagn
 
 /// Splits a `Result<T, E>` return type into `(T, Some(E))`. Any other type
 /// passes through unchanged, with no error arm.
-fn split_result(ty: &syn::Type) -> (syn::Type, Option<syn::Type>) {
+pub(crate) fn split_result(ty: &syn::Type) -> (syn::Type, Option<syn::Type>) {
     let t = peel(ty);
     if let syn::Type::Path(p) = t {
         if let Some(seg) = p.path.segments.last() {
@@ -623,7 +623,7 @@ fn split_result(ty: &syn::Type) -> (syn::Type, Option<syn::Type>) {
 
 /// What a response body unwraps to: void, with nothing further to resolve,
 /// or a type whose final path segment names the response.
-enum Unwrapped {
+pub(crate) enum Unwrapped {
     Void,
     Type(Box<syn::Type>),
 }
@@ -631,7 +631,7 @@ enum Unwrapped {
 /// Unwraps `Json<T>` to `T`, and a `(StatusCode, T)` tuple to `T` -- itself
 /// unwrapped the same way, since it could in turn be `Json<T2>`. `()` or a
 /// bare `StatusCode`, at any point, is void.
-fn unwrap_response_body(ty: &syn::Type) -> Unwrapped {
+pub(crate) fn unwrap_response_body(ty: &syn::Type) -> Unwrapped {
     let t = peel(ty);
     match t {
         syn::Type::Tuple(tup) if tup.elems.is_empty() => Unwrapped::Void,

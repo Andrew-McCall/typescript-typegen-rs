@@ -26,6 +26,14 @@ pub struct ScanOutput {
     pub fns: Vec<FnItem>,
 }
 
+impl ScanOutput {
+    /// Splits the scan apart so its `fns` can be collected against a
+    /// `&mut Registry` already moved out of this struct.
+    pub fn split(self) -> (Registry, Vec<FnItem>) {
+        (self.registry, self.fns)
+    }
+}
+
 /// A `fn` item found while walking, kept regardless of whether it looks like
 /// a handler -- relevance is decided later by discovery logic.
 pub struct FnItem {

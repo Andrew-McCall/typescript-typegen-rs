@@ -7,10 +7,16 @@
 //! `attr.path()` against each configured [`RouteAttr`] name covers both.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-use crate::axum::config::{Axum, RouteAttr};
+use crate::attrs::RenameRule;
+use crate::axum::bind;
+use crate::axum::config::{Axum, Client, QueryArrays, RouteAttr};
+use crate::axum::path;
+use crate::config::Config;
 use crate::diag::{Diagnostic, Diagnostics};
-use crate::ir::SourceLoc;
+use crate::ir::{Body, Method, Registry, Route, RouteParam, SourceLoc, Ty};
+use crate::lower::LowerCtx;
 use crate::parse::loc_of;
 use crate::scan::FnItem;
 
@@ -245,6 +251,291 @@ fn set_once<T>(slot: &mut Option<T>, key: &str, value: T, loc: &SourceLoc, diags
     *slot = Some(value);
 }
 
+/// Turns every discovered `FnItem` into a [`Route`] and inserts it into
+/// `reg`.
+///
+/// Each fn goes through, in order: reading its [`RouteFact`] (skipping it
+/// entirely when there is none, or when it's marked `skip`); computing its
+/// `group` from its file's directory; resolving its declared path and
+/// method, with the configured prefix applied; classifying its extractors
+/// and zipping its path captures; excluding a streaming response with a
+/// warning instead of inferring one; inferring its response and error
+/// types; checking the `method` key reservation on an `any` route;
+/// recording its query-array convention; and finally building and
+/// inserting the `Route`, diagnosing a clash with either an existing route
+/// of the same method and path, or an existing route with the same name in
+/// the same group.
+pub fn collect_routes(
+    fns: &[FnItem],
+    reg: &mut Registry,
+    cfg: &Config,
+    ctx: &LowerCtx,
+    diags: &mut Diagnostics,
+) {
+    let axum = cfg.axum_config().expect("axum configured");
+    let mut claimed: HashMap<(Vec<String>, String), SourceLoc> = HashMap::new();
+
+    for f in fns {
+        let Some(fact) = fact_from_attrs(f, axum, diags) else { continue };
+        if fact.overrides.skip {
+            continue;
+        }
+
+        let Some(group) = route_group(&f.file, axum, cfg.scans(), &fact.loc, diags) else { continue };
+
+        let (Some(declared_path), Some(method_str)) = (&fact.path, &fact.method) else { continue };
+        let Some(method) = parse_method(method_str) else {
+            diags.push(Diagnostic::new(
+                fact.loc.clone(),
+                format!("route method `{method_str}` is not a method axum recognizes"),
+            ));
+            continue;
+        };
+
+        let effective_path = match fact.overrides.prefix {
+            Some(false) => declared_path.clone(),
+            _ => match axum.prefix_for(declared_path) {
+                Some(prefix) => format!("/{}{}", prefix.trim_matches('/'), declared_path),
+                None => declared_path.clone(),
+            },
+        };
+        let Some(segs) = path::parse_template(&effective_path, &fact.loc, diags) else { continue };
+
+        let extracted = bind::classify(&f.item.sig, axum, ctx, &fact.loc, diags);
+        let params =
+            bind::zip_params(&segs, extracted.path.as_ref(), &fact.overrides, reg, ctx, &fact.loc, diags);
+
+        if is_streaming_response(&f.item.sig) {
+            diags.push(Diagnostic::warning(
+                fact.loc.clone(),
+                format!(
+                    "`{}` streams its response and is excluded from the generated client",
+                    f.item.sig.ident
+                ),
+            ));
+            continue;
+        }
+
+        let Some((response, error)) =
+            bind::infer_response(&f.item.sig, &fact.overrides, axum, reg, ctx, &fact.loc, diags)
+        else {
+            continue;
+        };
+
+        if method == Method::Any && names_the_reserved_method_key(&params, &extracted) {
+            diags.push(
+                Diagnostic::new(
+                    fact.loc.clone(),
+                    "`method` is reserved on an `any` route's argument object",
+                )
+                .with_help(
+                    "rename the path capture, query, or body binding named `method` \
+                     so it doesn't collide with the reserved key",
+                ),
+            );
+            continue;
+        }
+
+        let query_arrays = query_arrays_for(&extracted, axum, reg, &fact.loc, diags);
+
+        let ts_name = fact
+            .overrides
+            .fn_name
+            .clone()
+            .unwrap_or_else(|| RenameRule::Camel.apply_to_field(&f.item.sig.ident.to_string()));
+
+        let key = (group.clone(), ts_name.clone());
+        if let Some(existing) = claimed.get(&key) {
+            diags.push(
+                Diagnostic::new(
+                    fact.loc.clone(),
+                    format!("duplicate route name `{ts_name}` in group [{}]", group.join(".")),
+                )
+                .with_help(format!(
+                    "already declared at {}:{}; use #[ts_route(fn_name = \"...\")] to rename one of them",
+                    existing.file.display(),
+                    existing.line
+                )),
+            );
+            continue;
+        }
+
+        let route = Route {
+            method,
+            path: path::render(&segs),
+            ts_name,
+            group,
+            params,
+            query: extracted.query.map(|(_, ty)| ty),
+            body: extracted.body.map(|(_, body)| body),
+            response,
+            error,
+            query_arrays,
+            docs: Vec::new(),
+            loc: fact.loc.clone(),
+        };
+
+        claimed.insert(key, route.loc.clone());
+
+        if let Err(clash) = reg.insert_route(route) {
+            diags.push(
+                Diagnostic::new(clash.incoming.clone(), format!("duplicate route `{}`", clash.key))
+                    .with_help(format!(
+                        "already declared at {}:{}; use #[ts_route(fn_name = \"...\")] to rename one \
+                         of them, or change its path or method so it doesn't collide",
+                        clash.existing.file.display(),
+                        clash.existing.line
+                    )),
+            );
+        }
+    }
+}
+
+/// The HTTP method an attribute's `method = "..."` value names, matched
+/// case-insensitively. `None` for anything axum doesn't recognize.
+fn parse_method(s: &str) -> Option<Method> {
+    Some(match s.to_ascii_uppercase().as_str() {
+        "GET" => Method::Get,
+        "POST" => Method::Post,
+        "PUT" => Method::Put,
+        "PATCH" => Method::Patch,
+        "DELETE" => Method::Delete,
+        "HEAD" => Method::Head,
+        "OPTIONS" => Method::Options,
+        "TRACE" => Method::Trace,
+        "ANY" => Method::Any,
+        _ => return None,
+    })
+}
+
+/// The route's `group`: the handler file's parent directory, relative to
+/// whichever configured scan root it falls under, with a configured
+/// `Client::Modules { strip }` segment dropped and every remaining
+/// component camelCased.
+///
+/// `apply_to_field` only treats `_` as a word separator, matching serde's
+/// own assumption that its input is already `snake_case` -- a directory
+/// name is just as likely to be `kebab-case`, so a literal `-` is folded
+/// into `_` first. `None` when a segment can't become a legal TypeScript
+/// member name even after that -- a leading digit survives any casing --
+/// and the caller treats that as a fatal error for this route.
+fn route_group(
+    file: &Path,
+    cfg: &Axum,
+    scans: &[PathBuf],
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Option<Vec<String>> {
+    let parent = file.parent().unwrap_or(file);
+    let mut rel: Vec<String> = scans
+        .iter()
+        .find(|root| parent.starts_with(root.as_path()))
+        .and_then(|root| parent.strip_prefix(root).ok())
+        .map(|p| {
+            p.components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(s) => s.to_str().map(str::to_string),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Client::Modules { strip: Some(s) } = cfg.client_style() {
+        if rel.first().map(String::as_str) == Some(s.as_str()) {
+            rel.remove(0);
+        }
+    }
+
+    let mut group = Vec::with_capacity(rel.len());
+    for raw in &rel {
+        let cased = RenameRule::Camel.apply_to_field(&raw.replace('-', "_"));
+        let starts_ok = cased.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if !starts_ok {
+            diags.push(
+                Diagnostic::new(
+                    loc.clone(),
+                    format!("directory `{raw}` can't become a TypeScript identifier"),
+                )
+                .with_help(
+                    "rename the directory, or move the handler so its group comes from a \
+                     different path",
+                ),
+            );
+            return None;
+        }
+        group.push(cased);
+    }
+    Some(group)
+}
+
+/// Whether a handler's (possibly `Result`-wrapped) return type is a
+/// streaming extractor -- `Sse<_>` or `WebSocketUpgrade` -- which excludes
+/// the route from the client instead of going through [`bind::infer_response`].
+/// Unwraps the return type the same way `infer_response` does internally,
+/// via its own `split_result`/`unwrap_response_body`/`final_segment`.
+fn is_streaming_response(sig: &syn::Signature) -> bool {
+    let syn::ReturnType::Type(_, ty) = &sig.output else { return false };
+    let (ok, _) = bind::split_result(ty);
+    match bind::unwrap_response_body(&ok) {
+        bind::Unwrapped::Void => false,
+        bind::Unwrapped::Type(resolved) => {
+            matches!(bind::final_segment(&resolved).as_deref(), Some("Sse") | Some("WebSocketUpgrade"))
+        }
+    }
+}
+
+/// Whether `"method"` -- the reserved key on an `any` route's argument
+/// object -- is claimed by a path capture, the query binding, or the body
+/// binding.
+fn names_the_reserved_method_key(params: &[RouteParam], extracted: &bind::Extracted) -> bool {
+    params.iter().any(|p| p.name == "method")
+        || extracted.query.as_ref().is_some_and(|(name, _)| name == "method")
+        || extracted.body.as_ref().is_some_and(|(name, _)| name == "method")
+}
+
+/// The route's [`Route::query_arrays`] convention: `None` unless
+/// the query extractor's type resolves to a registered struct with at least
+/// one `Vec<_>`-shaped field -- `serde_urlencoded` doesn't round-trip an
+/// array the way JSON would, so that divergence needs either a warning or a
+/// configured convention.
+fn query_arrays_for(
+    extracted: &bind::Extracted,
+    cfg: &Axum,
+    reg: &Registry,
+    loc: &SourceLoc,
+    diags: &mut Diagnostics,
+) -> Option<String> {
+    let Some((_, Ty::Ref { name, .. })) = &extracted.query else { return None };
+    let decl = reg.lookup(name)?;
+    let Body::Struct(fields) = &decl.body else { return None };
+
+    let array_fields: Vec<&str> = fields
+        .iter()
+        .filter(|f| matches!(f.ty, Ty::Array(_)))
+        .map(|f| f.ts_name.as_str())
+        .collect();
+    if array_fields.is_empty() {
+        return None;
+    }
+
+    match cfg.query_arrays_style() {
+        QueryArrays::Warn => {
+            diags.push(Diagnostic::warning(
+                loc.clone(),
+                format!(
+                    "query field(s) {} are array-typed; serde_urlencoded doesn't round-trip \
+                     these the way JSON would",
+                    array_fields.join(", ")
+                ),
+            ));
+            None
+        }
+        QueryArrays::Csv => Some("csv".to_string()),
+        QueryArrays::Repeated => Some("repeated".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +635,187 @@ mod tests {
     fn skip_marks_the_route_hidden() {
         let (fact, _) = facts("#[ts_route(skip)] async fn h() {}", &Axum::new());
         assert!(fact.unwrap().overrides.skip);
+    }
+}
+
+#[cfg(test)]
+mod collect_routes_tests {
+    use super::*;
+    use crate::axum::config::{Client, QueryArrays};
+    use crate::config::Config;
+    use crate::ir::Route;
+    use crate::lower::LowerCtx;
+    use crate::scan::scan_roots;
+
+    /// Writes `files` (path relative to the crate's `src`, contents) into a
+    /// temp crate and scans it.
+    ///
+    /// `scan.rs`'s `Item::Mod` arm resolves `mod NAME;` only by looking for a
+    /// file literally named `NAME.rs` or `NAME/mod.rs` next to the current
+    /// file -- it never reads `#[path = "..."]`, so a fixture can't reach an
+    /// arbitrary directory through a `mod` chain. It also can't build a
+    /// literal nested `pub mod` chain, because several directories used below
+    /// (`patient-notes`, `2fa`) aren't legal Rust identifiers and `mod`
+    /// syntax requires one. Instead, each file's own parent directory is
+    /// used as its own scan root: with no `lib.rs`/`main.rs` present,
+    /// `entry_points` picks up every `.rs` file found directly inside a
+    /// directory with no `mod` declaration needed at all, so `FnItem.file`
+    /// ends up carrying the exact directory names written here.
+    fn collect(files: &[(&str, &str)], axum: Axum) -> (Vec<Route>, Diagnostics, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        for (rel, body) in files {
+            let path = src.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            let parent = path.parent().unwrap().to_path_buf();
+            if !roots.contains(&parent) {
+                roots.push(parent);
+            }
+        }
+
+        let cfg = Config::new().scan(&src).output(dir.path().join("bindings")).axum(axum);
+        let mut diags = Diagnostics::default();
+        let scan = scan_roots(&roots, &LowerCtx::default(), &mut diags);
+        let (mut reg, fns) = scan.split();
+        collect_routes(&fns, &mut reg, &cfg, &LowerCtx::default(), &mut diags);
+        (reg.routes().to_vec(), diags, dir)
+    }
+
+    fn modules(strip: &str) -> Axum {
+        Axum::new().client(Client::Modules { strip: Some(strip.to_string()) })
+    }
+
+    fn only(files: &[(&str, &str)], axum: Axum) -> Route {
+        let (routes, d, _dir) = collect(files, axum);
+        assert!(!d.has_errors(), "unexpected errors: {:?}", d.iter().collect::<Vec<_>>());
+        routes.into_iter().next().expect("one route")
+    }
+
+    const GET_PATIENT: &str = r#"#[ts_route(path = "/patient/{id}", method = "GET")]
+pub async fn get_patient(Path(id): Path<i64>) -> Json<PatientView> { todo!() }"#;
+
+    #[test]
+    fn a_group_comes_from_the_directory_with_the_strip_segment_removed() {
+        let r = only(&[("handlers/patient_view/get_patient.rs", GET_PATIENT)], modules("handlers"));
+        assert_eq!(r.group, vec!["patientView"]);
+        assert_eq!(r.ts_name, "getPatient");
+    }
+
+    #[test]
+    fn a_handler_in_the_stripped_root_has_no_group() {
+        let r = only(&[("handlers/monitor.rs", GET_PATIENT)], modules("handlers"));
+        assert!(r.group.is_empty());
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_valid_identifier_is_camelcased_into_one() {
+        let r = only(&[("handlers/patient-notes/get_patient.rs", GET_PATIENT)], modules("handlers"));
+        assert_eq!(r.group, vec!["patientNotes"]);
+    }
+
+    #[test]
+    fn a_group_that_cannot_become_an_identifier_is_an_error() {
+        let (routes, d, _dir) =
+            collect(&[("handlers/2fa/get_patient.rs", GET_PATIENT)], modules("handlers"));
+        assert!(routes.is_empty());
+        assert!(d.has_errors());
+        assert!(d.iter().next().unwrap().message.contains("2fa"));
+    }
+
+    #[test]
+    fn the_configured_prefix_is_applied_except_to_exempt_paths() {
+        let axum = modules("handlers").prefix("v2").prefix_exempt(["/auth/*"]);
+        let prefixed = only(&[("handlers/p/get_patient.rs", GET_PATIENT)], axum.clone());
+        assert_eq!(prefixed.path, "/v2/patient/{id}");
+
+        let exempt_src = r#"#[ts_route(path = "/auth/refresh", method = "POST")]
+pub async fn refresh() -> Json<PatientView> { todo!() }"#;
+        let exempt = only(&[("handlers/auth/refresh.rs", exempt_src)], axum);
+        assert_eq!(exempt.path, "/auth/refresh");
+    }
+
+    #[test]
+    fn a_per_route_prefix_opt_out_wins_over_the_config() {
+        let src = r#"#[ts_route(path = "/hello", method = "GET", prefix = false)]
+pub async fn hello() -> Json<PatientView> { todo!() }"#;
+        let r = only(&[("handlers/h/hello.rs", src)], modules("handlers").prefix("v2"));
+        assert_eq!(r.path, "/hello");
+    }
+
+    #[test]
+    fn annotated_discovery_skips_unannotated_handlers_and_skip_hides_a_route() {
+        let hidden = r#"#[ts_route(path = "/c", method = "GET", skip)]
+pub async fn c() -> Json<PatientView> { todo!() }"#;
+        let (routes, _d, _dir) = collect(
+            &[
+                ("handlers/a/get_patient.rs", GET_PATIENT),
+                ("handlers/b/plain.rs", "pub async fn plain() {}"),
+                ("handlers/c/c.rs", hidden),
+            ],
+            modules("handlers"),
+        );
+        assert_eq!(routes.iter().map(|r| r.ts_name.as_str()).collect::<Vec<_>>(), vec!["getPatient"]);
+    }
+
+    #[test]
+    fn two_handlers_colliding_in_one_group_is_an_error_naming_both() {
+        let other = r#"#[ts_route(path = "/other/{id}", method = "GET")]
+pub async fn get_patient(Path(id): Path<i64>) -> Json<PatientView> { todo!() }"#;
+        let (_, d, _dir) = collect(
+            &[("handlers/p/a.rs", GET_PATIENT), ("handlers/p/b.rs", other)],
+            modules("handlers"),
+        );
+        assert!(d.has_errors());
+        assert!(d.iter().any(|x| x.help.as_deref().unwrap_or_default().contains("rename")));
+    }
+
+    #[test]
+    fn a_streaming_response_route_is_excluded_with_a_warning() {
+        let src = r#"#[ts_route(path = "/events", method = "GET")]
+pub async fn events() -> Sse<EventStream> { todo!() }"#;
+        let (routes, d, _dir) = collect(&[("handlers/e/events.rs", src)], modules("handlers"));
+        assert!(routes.is_empty());
+        assert!(!d.has_errors(), "a streaming route must not fail the build");
+        assert_eq!(d.len(), 1);
+    }
+
+    #[test]
+    fn a_vec_field_in_a_query_type_warns_about_the_urlencoded_divergence() {
+        let src = r#"#[derive(ts_typegen::Ts)]
+pub struct Filter { pub ids: Vec<i64> }
+
+#[ts_route(path = "/search", method = "GET")]
+pub async fn search(Query(filter): Query<Filter>) -> Json<PatientView> { todo!() }"#;
+        let (routes, d, _dir) = collect(&[("handlers/s/search.rs", src)], modules("handlers"));
+        assert_eq!(routes.len(), 1, "the route is still generated");
+        assert!(!d.has_errors());
+        assert!(d.iter().any(|x| x.message.contains("ids")), "the field must be named");
+    }
+
+    #[test]
+    fn a_capture_named_method_on_an_any_route_is_an_error() {
+        let src = r#"#[ts_route(path = "/proxy/{method}", method = "ANY")]
+pub async fn proxy(Path(method): Path<String>) -> Json<PatientView> { todo!() }"#;
+        let (routes, d, _dir) = collect(&[("handlers/p/proxy.rs", src)], modules("handlers"));
+        assert!(routes.is_empty());
+        assert!(d.has_errors(), "`method` is the reserved key on an ANY route");
+        assert!(d.iter().next().unwrap().help.as_deref().unwrap().contains("rename"));
+    }
+
+    #[test]
+    fn csv_query_arrays_record_the_convention_instead_of_warning() {
+        let src = r#"#[derive(ts_typegen::Ts)]
+pub struct Filter { pub ids: Vec<i64> }
+
+#[ts_route(path = "/search", method = "GET")]
+pub async fn search(Query(filter): Query<Filter>) -> Json<PatientView> { todo!() }"#;
+        let axum = modules("handlers").query_arrays(QueryArrays::Csv);
+        let (routes, d, _dir) = collect(&[("handlers/s/search.rs", src)], axum);
+        assert_eq!(routes.len(), 1);
+        assert!(d.is_empty(), "Csv settles it, so nothing is reported: {:?}", d.iter().collect::<Vec<_>>());
     }
 }
