@@ -1,11 +1,15 @@
 //! Emitting the generated TypeScript client: the sender contract in
 //! `sender.ts`, and the per-route type map in `routes.ts`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
+use crate::axum::config::Client;
+use crate::axum::path::{self, Segment};
 use crate::config::Config;
+use crate::diag::Diagnostics;
 use crate::emit::emit_ty;
-use crate::ir::{Field, Registry, Route, RouteBody, Ty};
+use crate::ir::{Field, Method, Prim, Registry, Route, RouteBody, SourceLoc, Ty};
 use crate::render::MARKER;
 
 /// Mirrors [`crate::render`]'s private `banner`: the marker line plus any
@@ -107,24 +111,27 @@ fn render_entry(route: &Route, cfg: &Config, refs: &mut BTreeSet<String>) -> Str
     out
 }
 
+/// A [`Field`] standing in for one argument-object key, carrying nothing a
+/// handler-struct field would (no optionality, no flattening, no docs).
+fn plain_field(name: &str, ty: Ty) -> Field {
+    Field {
+        rust_name: name.to_string(),
+        ts_name: name.to_string(),
+        ty,
+        optional: false,
+        flatten: false,
+        readonly: false,
+        inline: false,
+        docs: vec![],
+    }
+}
+
 fn render_params(route: &Route, cfg: &Config, refs: &mut BTreeSet<String>) -> String {
     if route.params.is_empty() {
         return "never".to_string();
     }
-    let fields: Vec<Field> = route
-        .params
-        .iter()
-        .map(|p| Field {
-            rust_name: p.name.clone(),
-            ts_name: p.name.clone(),
-            ty: p.ty.clone(),
-            optional: false,
-            flatten: false,
-            readonly: false,
-            inline: false,
-            docs: vec![],
-        })
-        .collect();
+    let fields: Vec<Field> =
+        route.params.iter().map(|p| plain_field(&p.name, p.ty.clone())).collect();
     let ty = Ty::Object(fields);
     collect_ty_refs(&ty, refs);
     emit_ty(&ty, cfg)
@@ -194,9 +201,250 @@ fn collect_ty_refs(ty: &Ty, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Renders the generated TypeScript client: `client.ts` plus one
+/// `client/<group>.ts` per non-empty [`Route::group`], or (under
+/// [`Client::Flat`]) a single flat `client.ts` with no group files at all.
+/// A missing axum section renders the same as `Client::None` -- the
+/// per-group layout -- since whether to call this at all is the caller's
+/// decision, not this function's.
+pub fn render_client(reg: &Registry, cfg: &Config) -> BTreeMap<String, String> {
+    let flat = cfg.axum_config().is_some_and(|a| matches!(a.client_style(), Client::Flat));
+    if flat {
+        render_flat(reg, cfg)
+    } else {
+        render_modules(reg, cfg)
+    }
+}
+
+fn render_flat(reg: &Registry, cfg: &Config) -> BTreeMap<String, String> {
+    let mut refs = BTreeSet::new();
+    let members: Vec<String> =
+        reg.routes().iter().map(|r| render_route_member(r, cfg, &mut refs, "    ")).collect();
+    let any_route = reg.routes().iter().any(|r| r.method == Method::Any);
+
+    let mut out = banner(cfg);
+    out.push_str(&sender_import("./", any_route, cfg));
+    for name in &refs {
+        out.push_str(&format!("import type {{ {name} }} from \"./{name}{}\";\n", cfg.extension()));
+    }
+    out.push('\n');
+    out.push_str(&root_factory(&[], &members));
+
+    let mut files = BTreeMap::new();
+    files.insert("client.ts".to_string(), out);
+    files
+}
+
+fn render_modules(reg: &Registry, cfg: &Config) -> BTreeMap<String, String> {
+    let mut grouped: BTreeMap<Vec<String>, Vec<&Route>> = BTreeMap::new();
+    let mut ungrouped: Vec<&Route> = Vec::new();
+    for route in reg.routes() {
+        if route.group.is_empty() {
+            ungrouped.push(route);
+        } else {
+            grouped.entry(route.group.clone()).or_default().push(route);
+        }
+    }
+
+    let mut files = BTreeMap::new();
+    // (the group file's path under client/, the factory's exported name). A
+    // group deeper than one level is untested by this plan; the leaf
+    // component stands in for both the factory name and the root's member
+    // key, which is simple and matches every tested case exactly, but two
+    // different parents sharing a leaf name would collide at the root.
+    let mut groups: Vec<(String, String)> = Vec::new();
+    for (group, routes) in &grouped {
+        let name = group.last().cloned().unwrap_or_default();
+        let join = group.join("/");
+        files.insert(format!("client/{join}.ts"), render_group_file(group, routes, &name, cfg));
+        groups.push((join, name));
+    }
+
+    let mut refs = BTreeSet::new();
+    let members: Vec<String> =
+        ungrouped.iter().map(|r| render_route_member(r, cfg, &mut refs, "    ")).collect();
+    let any_route = ungrouped.iter().any(|r| r.method == Method::Any);
+
+    let mut out = banner(cfg);
+    out.push_str(&sender_import("./", any_route, cfg));
+    for (join, name) in &groups {
+        out.push_str(&format!("import {{ {name} }} from \"./client/{join}{}\";\n", cfg.extension()));
+    }
+    for name in &refs {
+        out.push_str(&format!("import type {{ {name} }} from \"./{name}{}\";\n", cfg.extension()));
+    }
+    out.push('\n');
+
+    let group_lines: Vec<String> =
+        groups.iter().map(|(_, name)| format!("    {name}: {name}(s),\n")).collect();
+    out.push_str(&root_factory(&group_lines, &members));
+
+    files.insert("client.ts".to_string(), out);
+    files
+}
+
+/// `export function createClient...` plus the derived `Client` type alias,
+/// its `return {{ ... }}` body built from the group-assembly lines (empty
+/// under `Client::Flat`) followed by every inlined route member.
+fn root_factory(group_lines: &[String], members: &[String]) -> String {
+    let mut out = String::from("export function createClient<O = never>(s: Sender<O>) {\n");
+    out.push_str("  return {\n");
+    for line in group_lines {
+        out.push_str(line);
+    }
+    for line in members {
+        out.push_str(line);
+    }
+    out.push_str("  };\n");
+    out.push_str("}\n");
+    out.push_str("export type Client<O = never> = ReturnType<typeof createClient<O>>;\n");
+    out
+}
+
+/// One group's file: the banner, its imports, and
+/// `export const <name> = <O,>(s: Sender<O>) => ({{ ... }});`.
+fn render_group_file(group: &[String], routes: &[&Route], name: &str, cfg: &Config) -> String {
+    let mut refs = BTreeSet::new();
+    let members: Vec<String> =
+        routes.iter().map(|r| render_route_member(r, cfg, &mut refs, "  ")).collect();
+    let any_route = routes.iter().any(|r| r.method == Method::Any);
+    // One level for `client/`, plus one more per nested group component --
+    // `client/patientView.ts` is one level under the output root, so one
+    // `../` reaches it; `client/a/b.ts` needs two.
+    let up = "../".repeat(group.len());
+
+    let mut out = banner(cfg);
+    out.push_str(&sender_import(&up, any_route, cfg));
+    for ref_name in &refs {
+        out.push_str(&format!(
+            "import type {{ {ref_name} }} from \"{up}{ref_name}{}\";\n",
+            cfg.extension()
+        ));
+    }
+    out.push('\n');
+    out.push_str(&format!("export const {name} = <O,>(s: Sender<O>) => ({{\n"));
+    for line in &members {
+        out.push_str(line);
+    }
+    out.push_str("});\n");
+    out
+}
+
+/// The `Sender` import line every group or root factory file needs; widened
+/// to also carry `Method` when the file inlines an `any`-method route, whose
+/// argument object references that sender-contract type by name.
+fn sender_import(prefix: &str, any_route: bool, cfg: &Config) -> String {
+    let names = if any_route { "Sender, Method" } else { "Sender" };
+    format!("import type {{ {names} }} from \"{prefix}sender{}\";\n", cfg.extension())
+}
+
+/// One route as a factory member: `name: (args, opts?: O) => s.send<R, E>({{
+/// ... }}, opts),`, indented by `indent`. `args` is omitted entirely when the
+/// route takes no method/params/body/query at all.
+fn render_route_member(route: &Route, cfg: &Config, refs: &mut BTreeSet<String>, indent: &str) -> String {
+    let fields = arg_fields(route);
+    for f in &fields {
+        collect_ty_refs(&f.ty, refs);
+    }
+    let arg_list = if fields.is_empty() {
+        String::new()
+    } else {
+        let keys = fields.iter().map(|f| f.ts_name.clone()).collect::<Vec<_>>().join(", ");
+        let ty = emit_ty(&Ty::Object(fields), cfg);
+        format!("{{ {keys} }}: {ty}, ")
+    };
+
+    collect_ty_refs(&route.response, refs);
+    let response = emit_ty(&route.response, cfg);
+    let error_ty = route.error.clone().unwrap_or(Ty::Unknown);
+    collect_ty_refs(&error_ty, refs);
+    let error = emit_ty(&error_ty, cfg);
+
+    let method_field = if route.method == Method::Any {
+        "method".to_string()
+    } else {
+        format!("\"{}\"", route.method.as_str())
+    };
+    let path_expr = render_path_literal(&route.path);
+
+    let mut out = format!(
+        "{indent}{}: ({arg_list}opts?: O) =>\n{indent}  s.send<{response}, {error}>({{\n",
+        route.ts_name
+    );
+    out.push_str(&format!("{indent}    method: {method_field},\n"));
+    out.push_str(&format!("{indent}    route: \"{}\",\n", route.path));
+    out.push_str(&format!("{indent}    path: {path_expr},\n"));
+    if route.query.is_some() {
+        out.push_str(&format!("{indent}    query: query,\n"));
+    }
+    if route.body.is_some() {
+        out.push_str(&format!("{indent}    body: body,\n"));
+    }
+    out.push_str(&format!("{indent}  }}, opts),\n"));
+    out
+}
+
+/// The argument-object fields for one route, in order: the reserved
+/// `method` key for an `any` route, then every path param by its own name,
+/// then `body`, then `query` -- the fixed literal names `Route` stores no
+/// original binding name for, per the plan's IR.
+fn arg_fields(route: &Route) -> Vec<Field> {
+    let mut fields = Vec::new();
+    if route.method == Method::Any {
+        fields.push(plain_field("method", Ty::Raw { template: "Method".to_string(), args: vec![] }));
+    }
+    for p in &route.params {
+        fields.push(plain_field(&p.name, p.ty.clone()));
+    }
+    if let Some(body) = &route.body {
+        fields.push(plain_field("body", body_ty(body)));
+    }
+    if let Some(query) = &route.query {
+        fields.push(plain_field("query", query.clone()));
+    }
+    fields
+}
+
+/// The argument-object type for a route's body extractor. `FormData` and
+/// `BodyInit` are global TS lib types, never declarations this crate emits,
+/// so neither needs an import -- the same reasoning [`render_body`] above
+/// documents for the `routes.ts` type map.
+fn body_ty(body: &RouteBody) -> Ty {
+    match body {
+        RouteBody::Typed(ty) => ty.clone(),
+        RouteBody::FormData => Ty::Raw { template: "FormData".to_string(), args: vec![] },
+        RouteBody::Raw => Ty::Raw { template: "BodyInit".to_string(), args: vec![] },
+        RouteBody::Text => Ty::Prim(Prim::Str),
+    }
+}
+
+/// The client call's `path:` value: a backtick TS template literal built by
+/// walking `route_path`'s parsed segments -- a literal contributes its
+/// [`path::escape_ts_literal`]-escaped text, a capture contributes
+/// `${name}` using the capture's own name, matching what the argument object
+/// destructures. A route whose path fails to re-parse here -- never true for
+/// one that passed through route discovery, only reachable from a
+/// hand-built `Route` bypassing it -- falls back to treating the whole
+/// string as one literal segment, so it still renders instead of panicking.
+fn render_path_literal(route_path: &str) -> String {
+    let loc = SourceLoc { file: PathBuf::new(), line: 0 };
+    let mut diags = Diagnostics::default();
+    let segs = path::parse_template(route_path, &loc, &mut diags)
+        .unwrap_or_else(|| vec![Segment::Literal(route_path.to_string())]);
+    let parts: Vec<String> = segs
+        .iter()
+        .map(|seg| match seg {
+            Segment::Literal(text) => path::escape_ts_literal(text),
+            Segment::Capture { name, .. } => format!("${{{name}}}"),
+        })
+        .collect();
+    format!("`{}`", parts.join("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::axum::config::{Axum, Client};
     use crate::config::Config;
     use crate::ir::{Method, Prim, RouteParam, SourceLoc};
 
@@ -247,6 +495,34 @@ mod tests {
         registry_of(vec![r])
     }
 
+    fn registry_with_two_groups() -> Registry {
+        let mut a = route(Method::Get, "/v2/patient/view/{id}", &["patientView"], "getPatient");
+        a.params = vec![RouteParam {
+            name: "id".into(),
+            ty: Ty::Prim(Prim::Int { bits: 64, signed: true }),
+            wildcard: false,
+        }];
+        a.response = Ty::Ref { name: "PatientView".into(), args: vec![] };
+
+        let mut b = route(Method::Get, "/v2/other/{id}", &["other"], "getPatient");
+        b.params = vec![RouteParam {
+            name: "id".into(),
+            ty: Ty::Prim(Prim::Int { bits: 64, signed: true }),
+            wildcard: false,
+        }];
+        b.response = Ty::Ref { name: "PatientView".into(), args: vec![] };
+
+        registry_of(vec![a, b])
+    }
+
+    fn registry_with_path(path: &str) -> Registry {
+        registry_of(vec![route(Method::Get, path, &[], "getThing")])
+    }
+
+    fn registry_with_any_route() -> Registry {
+        registry_of(vec![route(Method::Any, "/v2/proxy", &[], "proxyAny")])
+    }
+
     #[test]
     fn the_sender_file_is_marked_generated_and_defines_the_contract() {
         let ts = render_sender(&Config::new());
@@ -277,5 +553,61 @@ mod tests {
     fn a_csv_query_array_is_recorded_on_the_route() {
         let ts = render_routes(&registry_with_csv_query(), &Config::new());
         assert!(ts.contains("queryArrays: \"csv\""), "got: {ts}");
+    }
+
+    #[test]
+    fn a_group_module_takes_a_sender_and_interpolates_the_path() {
+        let files = render_client(&registry_with_get_patient(), &Config::new());
+        let m = &files["client/patientView.ts"];
+        assert!(m.contains("export const patientView = <O,>(s: Sender<O>) => ({"));
+        assert!(m.contains("getPatient: ({ id }: { id: number }, opts?: O) =>"));
+        assert!(m.contains("path: `/v2/patient/view/${id}`"), "got: {m}");
+        assert!(m.contains(r#"route: "/v2/patient/view/{id}""#));
+    }
+
+    #[test]
+    fn a_route_with_no_arguments_takes_only_options() {
+        let files = render_client(&registry_with_bare_get(), &Config::new());
+        assert!(files["client.ts"].contains("getSchemes: (opts?: O) =>"), "got: {}", files["client.ts"]);
+    }
+
+    #[test]
+    fn the_root_module_assembles_every_group() {
+        let files = render_client(&registry_with_two_groups(), &Config::new());
+        let root = &files["client.ts"];
+        assert!(root.contains("export function createClient<O = never>(s: Sender<O>) {"));
+        assert!(root.contains("patientView: patientView(s),"));
+        assert!(root.contains("export type Client<O = never> = ReturnType<typeof createClient<O>>;"));
+    }
+
+    #[test]
+    fn a_backtick_or_dollar_brace_in_a_path_is_escaped() {
+        let files = render_client(&registry_with_path("/a/`x`/${y}"), &Config::new());
+        let m = files.values().find(|v| v.contains("path:")).unwrap();
+        assert!(m.contains("\\`x\\`"), "backtick must be escaped: {m}");
+        assert!(m.contains("\\${y}"), "template hole must be escaped: {m}");
+    }
+
+    #[test]
+    fn an_any_route_takes_the_method_as_an_argument_key() {
+        let files = render_client(&registry_with_any_route(), &Config::new());
+        let m = files.values().find(|v| v.contains("method:")).unwrap();
+        assert!(m.contains("{ method }: { method: Method }"), "got: {m}");
+    }
+
+    #[test]
+    fn imports_honour_the_configured_extension_and_depth() {
+        let cfg = Config::new().import_extension(".js");
+        let files = render_client(&registry_with_get_patient(), &cfg);
+        assert!(files["client/patientView.ts"].contains("from \"../PatientView.js\""));
+        assert!(files["client/patientView.ts"].contains("from \"../sender.js\""));
+    }
+
+    #[test]
+    fn flat_mode_puts_every_function_on_one_object_and_emits_no_group_files() {
+        let cfg = Config::new().axum(Axum::new().client(Client::Flat));
+        let files = render_client(&registry_with_two_groups(), &cfg);
+        assert_eq!(files.keys().collect::<Vec<_>>(), vec!["client.ts"]);
+        assert_eq!(files["client.ts"].matches("getPatient:").count(), 2);
     }
 }
