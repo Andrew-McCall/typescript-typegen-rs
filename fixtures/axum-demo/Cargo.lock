@@ -457,14 +457,14 @@ dependencies = [
 
 [[package]]
 name = "ts-typegen"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "ts-typegen-macros",
 ]
 
 [[package]]
 name = "ts-typegen-build"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "proc-macro2",
  "syn",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "ts-typegen-macros"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
