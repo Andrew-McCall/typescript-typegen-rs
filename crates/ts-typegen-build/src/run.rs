@@ -99,7 +99,13 @@ pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
         } else {
             files.insert("sender.ts".into(), crate::axum::client::render_sender(cfg));
             files.insert("routes.ts".into(), crate::axum::client::render_routes(&reg, cfg));
-            files.extend(crate::axum::client::render_client(&reg, cfg));
+            let wants_client = !matches!(
+                cfg.axum_config().map(crate::axum::config::Axum::client_style),
+                Some(crate::axum::config::Client::None)
+            );
+            if wants_client {
+                files.extend(crate::axum::client::render_client(&reg, cfg));
+            }
         }
     }
     #[cfg(not(feature = "axum"))]

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
 
-use ts_typegen_build::axum::config::Axum;
+use ts_typegen_build::axum::config::{Axum, Client};
 use ts_typegen_build::run::generate;
 use ts_typegen_build::Config;
 
@@ -71,6 +71,37 @@ fn no_routes_discovered_warns_and_emits_no_client_files() {
     assert!(!dir.path().join("bindings/client.ts").exists());
     assert!(!dir.path().join("bindings/routes.ts").exists());
     assert!(!dir.path().join("bindings/sender.ts").exists());
+}
+
+#[test]
+fn client_none_suppresses_the_client_but_keeps_sender_and_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("lib.rs"),
+        r#"
+#[ts_route(path = "/health", method = "GET")]
+pub async fn health() -> axum::Json<Status> { todo!() }
+"#,
+    )
+    .unwrap();
+
+    let cfg = Config::new()
+        .scan(&src)
+        .output(dir.path().join("bindings"))
+        .axum(Axum::new().client(Client::None));
+    let outcome = generate(&cfg).expect("a single route is not a build failure");
+    assert!(
+        !outcome.warnings.iter().any(|w| w.contains("no routes")),
+        "the route must be discovered: {:?}",
+        outcome.warnings
+    );
+
+    assert!(dir.path().join("bindings/sender.ts").is_file());
+    assert!(dir.path().join("bindings/routes.ts").is_file());
+    assert!(!dir.path().join("bindings/client.ts").exists());
+    assert!(!dir.path().join("bindings/client").exists());
 }
 
 #[test]
