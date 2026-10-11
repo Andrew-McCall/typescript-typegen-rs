@@ -1,0 +1,14 @@
+[package]
+name = "macro-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ts-typegen = { path = "../../crates/ts-typegen" }
+macro-demo-macros = { path = "macros" }
+serde = { version = "1", features = ["derive"] }
+axum = "0.8"
+
+[build-dependencies]
+ts-typegen-build = { path = "../../crates/ts-typegen-build", features = ["axum"] }
