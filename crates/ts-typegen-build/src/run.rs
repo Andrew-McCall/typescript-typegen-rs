@@ -63,7 +63,9 @@ pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
         aliases: Default::default(),
     };
     let mut diags = Diagnostics::default();
-    let reg = scan_roots(cfg.scans(), &ctx, &mut diags);
+    let scan = scan_roots(cfg.scans(), &ctx, &mut diags);
+    #[cfg_attr(not(feature = "axum"), allow(unused_mut))]
+    let (mut reg, fns) = scan.split();
     if reg.decls().is_empty() {
         diags.push(
             crate::diag::Diagnostic::warning(
@@ -74,7 +76,34 @@ pub fn generate(cfg: &Config) -> Result<Outcome, Box<dyn Error>> {
         );
     }
 
-    let files = render_all(&reg, cfg, &mut diags);
+    #[cfg_attr(not(feature = "axum"), allow(unused_mut))]
+    let mut files = render_all(&reg, cfg, &mut diags);
+
+    #[cfg(feature = "axum")]
+    if cfg.axum_config().is_some() {
+        crate::axum::routes::collect_routes(&fns, &mut reg, cfg, &ctx, &mut diags);
+        if reg.routes().is_empty() {
+            diags.push(
+                crate::diag::Diagnostic::warning(
+                    crate::ir::SourceLoc {
+                        file: cfg.scans().first().cloned().unwrap_or_default(),
+                        line: 0,
+                    },
+                    "no routes discovered in the scanned roots",
+                )
+                .with_help(
+                    "annotate a handler with #[ts_route], configure .route_attr(..), \
+                     or enable .routers(true)",
+                ),
+            );
+        } else {
+            files.insert("sender.ts".into(), crate::axum::client::render_sender(cfg));
+            files.insert("routes.ts".into(), crate::axum::client::render_routes(&reg, cfg));
+            files.extend(crate::axum::client::render_client(&reg, cfg));
+        }
+    }
+    #[cfg(not(feature = "axum"))]
+    let _ = &fns;
 
     let render = |d: &crate::diag::Diagnostic| {
         let mut s = format!("{}:{} {}", d.loc.file.display(), d.loc.line, d.message);

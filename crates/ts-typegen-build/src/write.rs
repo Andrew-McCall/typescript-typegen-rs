@@ -135,6 +135,9 @@ pub fn write_all(
 
     for (name, contents) in files {
         let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         match std::fs::read_to_string(&path) {
             Ok(existing) if existing == *contents => report.unchanged.push(name.clone()),
             _ => {
@@ -146,6 +149,9 @@ pub fn write_all(
 
     for name in orphans(dir, files)? {
         std::fs::remove_file(dir.join(&name))?;
+        if let Some(parent) = Path::new(&name).parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::remove_dir(dir.join(parent));
+        }
         report.removed.push(name);
     }
     report.removed.sort();
@@ -157,28 +163,39 @@ pub fn write_all(
 /// current generation set.
 fn orphans(dir: &Path, files: &BTreeMap<String, String>) -> Result<Vec<String>, WriteError> {
     let mut out = Vec::new();
+    collect_orphans(dir, dir, files, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn collect_orphans(
+    root: &Path,
+    dir: &Path,
+    files: &BTreeMap<String, String>,
+    out: &mut Vec<String>,
+) -> Result<(), WriteError> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(out);
+        return Ok(());
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() || path.extension().is_none_or(|e| e != "ts") {
+        if path.is_dir() {
+            collect_orphans(root, &path, files, out)?;
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if files.contains_key(name) {
+        if path.extension().is_none_or(|e| e != "ts") {
             continue;
         }
-        let is_generated =
-            std::fs::read_to_string(&path).map(|c| c.starts_with(MARKER)).unwrap_or(false);
-        if is_generated {
-            out.push(name.to_string());
+        let Ok(rel) = path.strip_prefix(root) else { continue };
+        let key = rel.to_string_lossy().replace('\\', "/");
+        if files.contains_key(&key) {
+            continue;
+        }
+        if std::fs::read_to_string(&path).map(|c| c.starts_with(MARKER)).unwrap_or(false) {
+            out.push(key);
         }
     }
-    out.sort();
-    Ok(out)
+    Ok(())
 }
 
 fn diff_lines(name: &str, have: &str, want: &str) -> String {

@@ -3,3 +3,7 @@
 wip/
 /fixtures/demo/target
 /fixtures/demo/node_modules
+/fixtures/macro-demo/target
+/fixtures/macro-demo/node_modules
+/fixtures/axum-demo/target
+/fixtures/axum-demo/node_modules

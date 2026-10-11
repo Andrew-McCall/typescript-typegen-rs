@@ -76,3 +76,11 @@ mod strict {
         exempt
     }
 }
+
+/// Marks a handler as part of the generated TypeScript surface. Expands to the
+/// annotated item unchanged; the build script reads the attribute from source text.
+#[cfg(feature = "axum")]
+#[proc_macro_attribute]
+pub fn ts_route(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}

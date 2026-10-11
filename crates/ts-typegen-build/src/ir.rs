@@ -259,6 +259,79 @@ pub struct Decl {
     pub loc: SourceLoc,
 }
 
+#[cfg(feature = "axum")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+    Head,
+    Options,
+    Trace,
+    Any,
+}
+
+#[cfg(feature = "axum")]
+impl Method {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+            Self::Head => "HEAD",
+            Self::Options => "OPTIONS",
+            Self::Trace => "TRACE",
+            Self::Any => "ANY",
+        }
+    }
+}
+
+#[cfg(feature = "axum")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteParam {
+    pub name: String,
+    pub ty: Ty,
+    pub wildcard: bool,
+}
+
+#[cfg(feature = "axum")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteBody {
+    Typed(Ty),
+    FormData,
+    Raw,
+    Text,
+}
+
+#[cfg(feature = "axum")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub method: Method,
+    pub path: String,
+    pub ts_name: String,
+    pub group: Vec<String>,
+    pub params: Vec<RouteParam>,
+    pub query: Option<Ty>,
+    pub body: Option<RouteBody>,
+    pub response: Ty,
+    pub error: Option<Ty>,
+    pub query_arrays: Option<String>,
+    pub docs: Vec<String>,
+    pub loc: SourceLoc,
+}
+
+#[cfg(feature = "axum")]
+#[derive(Debug, Clone)]
+pub struct RouteClash {
+    pub key: String,
+    pub existing: SourceLoc,
+    pub incoming: SourceLoc,
+}
+
 /// Two declarations claimed the same TypeScript name.
 #[derive(Debug, Clone)]
 pub struct NameClash {
@@ -276,6 +349,10 @@ pub struct NameClash {
 pub struct Registry {
     decls: Vec<Decl>,
     by_ts_name: HashMap<String, usize>,
+    #[cfg(feature = "axum")]
+    routes: Vec<Route>,
+    #[cfg(feature = "axum")]
+    route_keys: HashMap<String, usize>,
 }
 
 impl Registry {
@@ -302,6 +379,25 @@ impl Registry {
     /// All declarations, in insertion order.
     pub fn decls(&self) -> &[Decl] {
         &self.decls
+    }
+
+    /// Adds a route, failing if its `METHOD /path` key is already taken — axum
+    /// panics on a duplicate at `Router` construction.
+    #[cfg(feature = "axum")]
+    pub fn insert_route(&mut self, route: Route) -> Result<(), RouteClash> {
+        let key = format!("{} {}", route.method.as_str(), route.path);
+        if let Some(&idx) = self.route_keys.get(&key) {
+            return Err(RouteClash { key, existing: self.routes[idx].loc.clone(), incoming: route.loc });
+        }
+        self.route_keys.insert(key, self.routes.len());
+        self.routes.push(route);
+        Ok(())
+    }
+
+    /// All routes, in insertion order.
+    #[cfg(feature = "axum")]
+    pub fn routes(&self) -> &[Route] {
+        &self.routes
     }
 }
 
@@ -366,5 +462,60 @@ mod tests {
                 signed: false
             })
         );
+    }
+}
+
+#[cfg(all(test, feature = "axum"))]
+mod route_tests {
+    use super::*;
+
+    fn route(method: Method, path: &str) -> Route {
+        Route {
+            method,
+            path: path.to_string(),
+            ts_name: "getThing".into(),
+            group: vec!["thing".into()],
+            params: vec![],
+            query: None,
+            body: None,
+            response: Ty::Prim(Prim::Null),
+            error: None,
+            query_arrays: None,
+            docs: vec![],
+            loc: SourceLoc { file: "h.rs".into(), line: 3 },
+        }
+    }
+
+    #[test]
+    fn methods_render_as_uppercase_wire_names() {
+        assert_eq!(Method::Get.as_str(), "GET");
+        assert_eq!(Method::Any.as_str(), "ANY");
+    }
+
+    #[test]
+    fn the_same_path_under_different_methods_is_not_a_clash() {
+        let mut reg = Registry::default();
+        reg.insert_route(route(Method::Get, "/a")).unwrap();
+        reg.insert_route(route(Method::Post, "/a")).expect("different method is fine");
+        assert_eq!(reg.routes().len(), 2);
+    }
+
+    #[test]
+    fn a_duplicate_method_and_path_clashes_with_both_locations() {
+        let mut reg = Registry::default();
+        reg.insert_route(route(Method::Get, "/a")).unwrap();
+        let mut second = route(Method::Get, "/a");
+        second.loc = SourceLoc { file: "other.rs".into(), line: 9 };
+        let clash = reg.insert_route(second).expect_err("duplicate must clash");
+        assert_eq!(clash.key, "GET /a");
+        assert_eq!(clash.existing.line, 3);
+        assert_eq!(clash.incoming.line, 9);
+    }
+
+    #[test]
+    fn a_trailing_slash_is_a_distinct_route_as_in_axum() {
+        let mut reg = Registry::default();
+        reg.insert_route(route(Method::Get, "/a")).unwrap();
+        reg.insert_route(route(Method::Get, "/a/")).expect("axum treats these as distinct");
     }
 }

@@ -92,6 +92,7 @@ never silent `unknown`.
 | `.struct_style(StructStyle)` | `Interface` | `interface` vs `type` for named-field structs. |
 | `.import_extension(ext)` | `""` | Append e.g. `".js"` for ESM under `moduleResolution: node16`. |
 | `.always_run(bool)` | `false` | Generate even when built as a dependency. |
+| `.axum(Axum)` | — | Enables axum route discovery and client generation; see [Axum routes](#axum-routes) below. |
 
 Integer widths are configured separately because the risk differs sharply.
 `i64` loses precision only above 2^53, which many payloads never reach; `i128`
@@ -196,6 +197,181 @@ Generic aliases work too — `pub type Boxed<T> = Vec<T>;` instantiates `T` at
 each use site, the same substitution a scanned generic struct gets. An alias
 can reference another alias declared anywhere in the scan, in either order;
 a cycle (`type A = B; type B = A;`) is a build error naming both, not a hang.
+
+## Axum routes
+
+```toml
+[dependencies]
+ts-typegen = { version = "1", features = ["axum"] }
+
+[build-dependencies]
+ts-typegen-build = { version = "1", features = ["axum"] }
+```
+
+`.axum(Axum::new()...)` opts a build into scanning for axum routes alongside
+the usual type scan. It emits `bindings/sender.ts` (the transport contract),
+`bindings/routes.ts` (every route as a type map), `bindings/client.ts` (the
+client factory), and one `bindings/client/<group>.ts` per route-bearing
+directory, alongside the type bindings you already get:
+
+```rust
+// build.rs
+ts_typegen_build::Config::new()
+    .scan("src")
+    .output("bindings")
+    .axum(
+        ts_typegen_build::axum::config::Axum::new()
+            .prefix("v2")
+            .prefix_exempt(["/auth/*"])
+            .client(ts_typegen_build::axum::config::Client::Modules {
+                strip: Some("handlers".into()),
+            }),
+    )
+    .run()
+```
+
+### Finding routes: attribute or router
+
+Two independent sources feed the same route IR, and either alone is enough.
+
+An **attribute** is the direct source — `#[ts_route(...)]`, or a foreign
+attribute your codebase already has, registered with `.route_attr(...)`:
+
+```rust
+.route_attr(
+    RouteAttr::new("api")
+        .path_key("Route")
+        .method_key("Method"),
+)
+```
+
+Reach for this when you want explicit control over what's exposed: the
+default `Discover::Annotated` mode hides anything unannotated.
+
+A **router** is the structural source — a real
+`Router::new().route(...).nest(...).merge(...)` builder chain, discovered
+with no annotation at all once you turn it on with `.routers(true)`. Reach
+for this for zero-annotation coverage of an existing idiomatic axum app,
+paired with `.discover(Discover::All)` to expose everything the router
+finds, minus anything marked `#[ts_route(skip)]`.
+
+Both sources can run together. When they disagree about the same handler's
+path or method, that's a build error naming both sites — which is exactly
+what makes running them together safe, as a drift check between what a
+handler claims and what actually serves it.
+
+### `#[ts_route]` and its overrides
+
+A bare `#[ts_route]` needs the router scan to resolve its path and method;
+spell them out instead when you'd rather not depend on that:
+
+```rust
+#[ts_route(path = "/patient/{id}", method = "GET")]
+async fn get_patient(Path(id): Path<i64>) -> Json<PatientView> { ... }
+```
+
+`response` and `request` (an alias for `body`) each take either a flat
+shorthand or a nested form:
+
+```rust
+#[ts_route(response = "Blob")]
+#[ts_route(response(type = "Blob"))]
+```
+
+Giving both spellings for the same piece is a build error, not a precedence
+rule — there's no reading of `response = "A", response(type = "B")` that
+isn't a mistake.
+
+`query_key = "filters"` is flat only, and renames the argument-object key a
+query extractor uses. `params(id(type = "number"))` is always nested — there
+is no flat form — and overrides a path capture's inferred type, or, with
+`params(id(rename = "..."))`, the name it's exposed under. `skip` hides a
+route entirely; `fn_name = "fetchPatient"` overrides the generated function
+name; `prefix = false` opts one route out of a configured `.prefix(...)`.
+
+### Argument objects
+
+A generated client function takes one object argument, keyed by the Rust
+binding names in the handler's signature:
+
+```rust
+async fn get_patient(Path(id): Path<i64>) -> Json<PatientView> { ... }
+```
+
+```ts
+getPatient: ({ id }: { id: number }, opts?: O) => ...
+```
+
+`Path(id): Path<i64>` becomes `{ id }`, camelCased the same way a field
+would be (`patient_id` → `patientId`); a `Path<Struct>` splats its fields the
+same way. A query or body extractor always keys its argument `query` /
+`body`. A route needing no arguments omits the object entirely.
+
+Keys come from Rust, not a convention — this is deliberate, so a renamed
+Rust binding is a visible breaking change on the TypeScript side instead of a
+silent mismatch.
+
+### `Sender` and `RouteResult`
+
+Every generated call returns `Promise<RouteResult<T, E>>`, a discriminated
+union on `ok` — `{ ok: true, data: T, status }` or
+`{ ok: false, errors: E, status }` — so a caller narrows a failed call as a
+value instead of needing to know to catch an exception. You supply one
+`Sender` adapter around whatever HTTP client you already use:
+
+```ts
+const sender: Sender = {
+  async send(req) {
+    const qs = req.query ? `?${new URLSearchParams(req.query as Record<string, string>)}` : "";
+    const res = await fetch(req.path + qs, {
+      method: req.method,
+      body: req.body ? JSON.stringify(req.body) : undefined,
+    });
+    return res.ok
+      ? { ok: true, data: await res.json(), status: res.status }
+      : { ok: false, errors: await res.json(), status: res.status };
+  },
+};
+```
+
+`Sender<O = never>`'s default type parameter, and the
+`ReturnType<typeof createClient<O>>` form used for the exported `Client`
+type, both need TypeScript 4.7 or newer.
+
+### Hiding routes
+
+`.discover(Discover)` picks which of the two sources' finds actually get
+emitted:
+
+| `.discover(..)` | Emitted |
+|---|---|
+| `Annotated` (default) | only handlers carrying `#[ts_route]` or a configured attribute |
+| `All` | every route either source finds, minus `#[ts_route(skip)]` |
+
+So a route stays hidden either way: don't annotate it, in the default mode;
+mark it `skip`, in `All` mode.
+
+### Diagnostics
+
+| Severity | Condition | Help |
+|---|---|---|
+| error | unknown extractor | `.extractor("X", Extractor::Ignore \| Body \| Query)` |
+| error | `Path` arity disagrees with template | fix the handler or the route |
+| error | `Path<Struct>` fields ≠ placeholders | both sets listed |
+| error | response un-inferable (`impl IntoResponse`) | `response = "..."`, or `.map_response` |
+| error | one route piece overridden in both spellings | both occurrences named |
+| error | handler not found for a discovered route | check the name, or the scan roots |
+| error | ambiguous handler reference | every candidate listed |
+| error | duplicate `METHOD /path` | both sites named; axum would panic |
+| error | attribute and router sources disagree | both sites named |
+| error | two handlers collide in one client group | `rename = "..."` |
+| error | bare `#[ts_route]` the router scan cannot resolve | give it a path/method, or enable `.routers(true)` |
+| error | binding named `method` on an `any` route | `rename = "..."` |
+| warning | template placeholder with no `Path` extractor | add `Path`, or `params(id(type = "..."))` |
+| warning | router expression not followable | annotate the handler, or `.strict_routes(true)` to fail |
+| warning | `Vec<_>`/nested field in a `Query<T>` type | urlencoded divergence named; `.query_arrays(..)` to settle it |
+| warning | streaming response route excluded | route named |
+| warning | non-literal `MethodFilter` in `on(..)` | route named |
 
 ## Attributes
 

@@ -20,8 +20,8 @@ fn fixture(files: &[(&str, &str)]) -> TempDir {
 fn scan(dir: &TempDir) -> (Registry, Diagnostics) {
     let mut diags = Diagnostics::default();
     let roots: Vec<PathBuf> = vec![dir.path().to_path_buf()];
-    let reg = scan_roots(&roots, &LowerCtx::default(), &mut diags);
-    (reg, diags)
+    let out = scan_roots(&roots, &LowerCtx::default(), &mut diags);
+    (out.registry, diags)
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn overlapping_scan_roots_do_not_duplicate_a_type() {
     ]);
     let mut diags = Diagnostics::default();
     let roots: Vec<PathBuf> = vec![dir.path().to_path_buf(), dir.path().to_path_buf()];
-    let reg = scan_roots(&roots, &LowerCtx::default(), &mut diags);
+    let reg = scan_roots(&roots, &LowerCtx::default(), &mut diags).registry;
 
     assert!(diags.is_empty(), "expected no duplicate-name diagnostic: {diags:?}");
     assert_eq!(reg.decls().len(), 1, "Deep must be registered exactly once");
@@ -158,4 +158,26 @@ fn unparseable_file_produces_a_diagnostic_rather_than_a_panic() {
     let dir = fixture(&[("lib.rs", "this is not rust !!!")]);
     let (_, diags) = scan(&dir);
     assert!(diags.iter().any(|d| d.message.contains("failed to parse")));
+}
+
+#[test]
+fn scanning_collects_handler_fns_with_their_module_path_and_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("handlers/patient")).unwrap();
+    std::fs::write(src.join("lib.rs"), "pub mod handlers;\n").unwrap();
+    std::fs::write(src.join("handlers.rs"), "pub mod patient;\n").unwrap();
+    std::fs::write(src.join("handlers/patient.rs"), "pub mod get_patient;\n").unwrap();
+    std::fs::write(
+        src.join("handlers/patient/get_patient.rs"),
+        "pub async fn get_patient(id: i64) -> i64 { id }\n",
+    )
+    .unwrap();
+
+    let mut diags = Diagnostics::default();
+    let out = scan_roots(std::slice::from_ref(&src), &LowerCtx::default(), &mut diags);
+
+    let f = out.fns.iter().find(|f| f.item.sig.ident == "get_patient").expect("fn collected");
+    assert_eq!(f.module_path, "crate::handlers::patient::get_patient");
+    assert!(f.file.ends_with("handlers/patient/get_patient.rs"));
 }

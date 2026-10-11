@@ -1,0 +1,3 @@
+type ApiErrorBody = {
+  message: string;
+};

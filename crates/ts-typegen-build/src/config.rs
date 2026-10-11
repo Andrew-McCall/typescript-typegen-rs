@@ -80,6 +80,8 @@ pub struct Config {
     type_map: TypeMap,
     check: bool,
     always_run: bool,
+    #[cfg(feature = "axum")]
+    axum: Option<crate::axum::config::Axum>,
 }
 
 impl Default for Config {
@@ -101,6 +103,8 @@ impl Default for Config {
             type_map: TypeMap::default(),
             check: std::env::var_os("TS_TYPEGEN_CHECK").is_some(),
             always_run: false,
+            #[cfg(feature = "axum")]
+            axum: None,
         }
     }
 }
@@ -235,6 +239,13 @@ impl Config {
         self
     }
 
+    /// Enables axum route discovery and client generation.
+    #[cfg(feature = "axum")]
+    pub fn axum(mut self, a: crate::axum::config::Axum) -> Self {
+        self.axum = Some(a);
+        self
+    }
+
     /// Run generation. Call this at the end of your `build.rs`.
     pub fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         for root in &self.scans {
@@ -328,6 +339,11 @@ impl Config {
     /// Whether generation runs even when this package is not cargo's primary package.
     pub fn always_run_enabled(&self) -> bool {
         self.always_run
+    }
+    /// The axum section, if one was configured.
+    #[cfg(feature = "axum")]
+    pub fn axum_config(&self) -> Option<&crate::axum::config::Axum> {
+        self.axum.as_ref()
     }
 }
 
