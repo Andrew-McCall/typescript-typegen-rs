@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/ts-typegen", "crates/ts-typegen-macros", "crates/ts-typegen-build"]
-exclude = ["fixtures/demo", "fixtures/macro-demo"]
+exclude = ["fixtures/demo", "fixtures/macro-demo", "fixtures/axum-demo"]
 resolver = "3"
 
 [workspace.package]

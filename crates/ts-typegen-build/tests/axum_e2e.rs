@@ -93,6 +93,48 @@ fn check_mode_detects_drift_in_a_generated_client_file() {
 }
 
 #[test]
+fn the_router_fixture_discovers_every_route_from_its_builder_chain() {
+    let _guard = FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = fixture_dir("axum-demo");
+    let bindings = dir.join("bindings");
+    let _ = std::fs::remove_dir_all(&bindings);
+
+    let out = build_fixture(&dir, &[]);
+    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let client = std::fs::read_to_string(bindings.join("client.ts")).unwrap();
+
+    // `{id}`-style capture.
+    assert!(client.contains("getPatient: ({ id }: { id: number }, opts?: O) =>"), "{client}");
+    assert!(client.contains("path: `/patients/${id}`"), "{client}");
+
+    // `:id`-style capture, on a separate route discovered the same way.
+    assert!(client.contains("getNote: ({ id }: { id: number }, opts?: O) =>"), "{client}");
+    assert!(client.contains("path: `/notes/${id}`"), "{client}");
+
+    // A tuple `Path` extractor.
+    assert!(client.contains("getWidget: ({ a, b }: { a: number; b: number }, opts?: O) =>"), "{client}");
+    assert!(client.contains("path: `/widgets/${a}/${b}`"), "{client}");
+
+    // A struct `Path` extractor, composed through a `.nest` prefix.
+    assert!(
+        client.contains("getOrderLine: ({ orderId, lineId }: { orderId: number; lineId: number }, opts?: O) =>"),
+        "{client}"
+    );
+    assert!(client.contains("path: `/orders/${orderId}/${lineId}`"), "{client}");
+
+    // An optional request body.
+    assert!(client.contains("addNote: ({ body }: { body: NewNote }, opts?: O) =>"), "{client}");
+
+    // An `any` route.
+    assert!(client.contains("healthCheck: ({ method }: { method: Method }, opts?: O) =>"), "{client}");
+    assert!(client.contains(r#"route: "/health""#), "{client}");
+
+    assert!(bindings.join("sender.ts").is_file());
+    assert!(bindings.join("routes.ts").is_file());
+}
+
+#[test]
 fn the_generated_client_type_checks_under_strict_mode() {
     let _guard = FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = fixture_dir("macro-demo");
