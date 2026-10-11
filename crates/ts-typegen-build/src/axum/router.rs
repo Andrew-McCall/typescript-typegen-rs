@@ -106,7 +106,7 @@ fn mark_refs(expr: &syn::Expr, fns: &[FnItem], referenced: &mut HashSet<String>,
 }
 
 fn mark_target(expr: &syn::Expr, fns: &[FnItem], referenced: &mut HashSet<String>, seen: &mut HashSet<String>) {
-    let syn::Expr::Call(call) = expr else { return };
+    let syn::Expr::Call(call) = peel_passthrough(expr) else { return };
     if !call.args.is_empty() {
         return;
     }
@@ -131,7 +131,7 @@ fn mark_target(expr: &syn::Expr, fns: &[FnItem], referenced: &mut HashSet<String
 /// span -- the original top-level entry, or the target of a followed
 /// `.nest`/`.merge` call once the walk has recursed into its body.
 fn walk(expr: &syn::Expr, prefix: &str, env: &RouterEnv, current: &FnItem, state: &mut WalkState) {
-    match expr {
+    match peel_passthrough(expr) {
         syn::Expr::MethodCall(mc) => match mc.method.to_string().as_str() {
             "route" => {
                 walk(&mc.receiver, prefix, env, current, state);
@@ -160,18 +160,34 @@ fn walk(expr: &syn::Expr, prefix: &str, env: &RouterEnv, current: &FnItem, state
                     walk(&mc.args[0], prefix, env, current, state);
                 }
             }
-            "layer" | "route_layer" | "with_state" | "fallback" => {
-                walk(&mc.receiver, prefix, env, current, state);
-            }
+            // peel_passthrough already strips every method call that isn't one of
+            // the three above; this arm only exists so a future passthrough name
+            // added there without a matching case here warns instead of panics.
             _ => walk(&mc.receiver, prefix, env, current, state),
         },
-        syn::Expr::Call(call) => walk_call(call, expr, prefix, env, current, state),
-        _ => unfollowable(
+        base @ syn::Expr::Call(call) => walk_call(call, base, prefix, env, current, state),
+        base => unfollowable(
             env.cfg,
             state.diags,
-            loc_of(&current.file, expr.span()),
+            loc_of(&current.file, base.span()),
             "an expression that cannot be followed",
         ),
+    }
+}
+
+/// Strips `.layer(...)`, `.route_layer(...)`, `.with_state(...)`, `.fallback(...)`,
+/// and any other method call this module doesn't specifically interpret, down to
+/// the expression underneath. `walk` uses this to find the real operation under
+/// an arbitrary stack of such wrappers; [`mark_target`] uses the same helper so
+/// the duplicate-fact pre-pass sees through exactly the same wrappers the real
+/// walk does -- `.nest("/api", routes().with_state(s))` must mark `routes` as
+/// referenced the same way `.nest("/api", routes())` does.
+fn peel_passthrough(expr: &syn::Expr) -> &syn::Expr {
+    match expr {
+        syn::Expr::MethodCall(mc) if !matches!(mc.method.to_string().as_str(), "route" | "nest" | "merge") => {
+            peel_passthrough(&mc.receiver)
+        }
+        _ => expr,
     }
 }
 
@@ -192,7 +208,7 @@ fn walk_route(
 
     for (verb, handler_expr) in extract_verbs(handler_arg, env.cfg, &loc, state.diags) {
         let syn::Expr::Path(p) = handler_expr else {
-            state.diags.push(Diagnostic::new(loc.clone(), "a route handler must be a plain function reference"));
+            unfollowable(env.cfg, state.diags, loc.clone(), "a route handler that is not a plain function reference");
             continue;
         };
         let Some(handler) = resolve_handler(&p.path, env.fns, &loc, state.diags) else { continue };
@@ -597,6 +613,31 @@ mod tests {
     fn strict_routes_escalates_an_unfollowable_expression_to_an_error() {
         let (_, d) = facts_diag_strict("fn app() -> Router { Router::new().route(PATH, get(h)) }");
         assert!(d.has_errors());
+    }
+
+    #[test]
+    fn a_non_path_handler_warns_and_does_not_fail_the_build() {
+        let (facts, d) =
+            facts_diag("fn app() -> Router { Router::new().route(\"/\", get(|| async { \"Hello\" })) }");
+        assert!(facts.is_empty());
+        assert!(!d.has_errors());
+        assert_eq!(d.len(), 1);
+    }
+
+    #[test]
+    fn strict_routes_escalates_a_non_path_handler_to_an_error() {
+        let (_, d) =
+            facts_diag_strict("fn app() -> Router { Router::new().route(\"/\", get(|| async { \"Hello\" })) }");
+        assert!(d.has_errors());
+    }
+
+    #[test]
+    fn nest_target_wrapped_in_with_state_does_not_duplicate_the_fact() {
+        let facts = facts_in_module(
+            "fn routes() -> Router { Router::new().route(\"/b\", get(h)) }
+             fn app() -> Router { Router::new().nest(\"/a\", routes().with_state(s)) }",
+        );
+        assert_eq!(paths(&facts), vec!["/a/b"]);
     }
 
     #[test]
