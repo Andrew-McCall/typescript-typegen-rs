@@ -224,6 +224,7 @@ fn render_flat(reg: &Registry, cfg: &Config) -> BTreeMap<String, String> {
 
     let mut out = banner(cfg);
     out.push_str(&sender_import("./", any_route, cfg));
+    out.push_str(&sender_reexport(cfg));
     for name in &refs {
         out.push_str(&format!("import type {{ {name} }} from \"./{name}{}\";\n", cfg.extension()));
     }
@@ -267,6 +268,7 @@ fn render_modules(reg: &Registry, cfg: &Config) -> BTreeMap<String, String> {
 
     let mut out = banner(cfg);
     out.push_str(&sender_import("./", any_route, cfg));
+    out.push_str(&sender_reexport(cfg));
     for (join, name) in &groups {
         out.push_str(&format!("import {{ {name} }} from \"./client/{join}{}\";\n", cfg.extension()));
     }
@@ -336,6 +338,13 @@ fn render_group_file(group: &[String], routes: &[&Route], name: &str, cfg: &Conf
 fn sender_import(prefix: &str, any_route: bool, cfg: &Config) -> String {
     let names = if any_route { "Sender, Method" } else { "Sender" };
     format!("import type {{ {names} }} from \"{prefix}sender{}\";\n", cfg.extension())
+}
+
+/// Re-exports the rest of the sender contract from the root client file, so a
+/// consumer only needs one import for `createClient` and the types its
+/// result is shaped from, instead of also reaching into `sender.ts` by hand.
+fn sender_reexport(cfg: &Config) -> String {
+    format!("export type {{ Sender, RouteResult }} from \"./sender{}\";\n", cfg.extension())
 }
 
 /// One route as a factory member: `name: (args, opts?: O) => s.send<R, E>({{
@@ -578,6 +587,16 @@ mod tests {
         assert!(root.contains("export function createClient<O = never>(s: Sender<O>) {"));
         assert!(root.contains("patientView: patientView(s),"));
         assert!(root.contains("export type Client<O = never> = ReturnType<typeof createClient<O>>;"));
+    }
+
+    #[test]
+    fn the_root_module_reexports_the_sender_contract() {
+        let grouped = render_client(&registry_with_two_groups(), &Config::new());
+        assert!(grouped["client.ts"].contains("export type { Sender, RouteResult } from \"./sender\";"));
+
+        let cfg = Config::new().axum(Axum::new().client(Client::Flat));
+        let flat = render_client(&registry_with_bare_get(), &cfg);
+        assert!(flat["client.ts"].contains("export type { Sender, RouteResult } from \"./sender\";"));
     }
 
     #[test]
