@@ -882,8 +882,10 @@ mod tests {
         cfg: &Axum,
         reg: &Registry,
     ) -> (Option<(Ty, Option<Ty>)>, Diagnostics) {
-        let mut ov = Overrides::default();
-        ov.response = response_override.map(str::to_string);
+        let ov = Overrides {
+            response: response_override.map(str::to_string),
+            ..Overrides::default()
+        };
         let mut d = Diagnostics::default();
         let loc = SourceLoc { file: "h.rs".into(), line: 1 };
         let r = infer_response(&sig(src), &ov, cfg, reg, &LowerCtx::default(), &loc, &mut d);

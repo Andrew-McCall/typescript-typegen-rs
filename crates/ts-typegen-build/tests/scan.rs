@@ -175,7 +175,7 @@ fn scanning_collects_handler_fns_with_their_module_path_and_file() {
     .unwrap();
 
     let mut diags = Diagnostics::default();
-    let out = scan_roots(&[src.clone()], &LowerCtx::default(), &mut diags);
+    let out = scan_roots(std::slice::from_ref(&src), &LowerCtx::default(), &mut diags);
 
     let f = out.fns.iter().find(|f| f.item.sig.ident == "get_patient").expect("fn collected");
     assert_eq!(f.module_path, "crate::handlers::patient::get_patient");

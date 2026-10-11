@@ -556,7 +556,7 @@ mod tests {
 
         let cfg = Config::new().scan(&src).output(dir.path().join("bindings")).axum(Axum::new().routers(true));
         let mut diags = Diagnostics::default();
-        let scan = scan_roots(&[src.clone()], &LowerCtx::default(), &mut diags);
+        let scan = scan_roots(std::slice::from_ref(&src), &LowerCtx::default(), &mut diags);
         let (mut reg, fns) = scan.split();
         collect_routes(&fns, &mut reg, &cfg, &LowerCtx::default(), &mut diags);
         (reg.routes().to_vec(), diags)
