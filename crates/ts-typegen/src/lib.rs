@@ -27,6 +27,13 @@
 
 pub use ts_typegen_macros::Ts;
 
+/// Marks a handler as part of the generated TypeScript client surface.
+///
+/// Like [`Ts`], this is an inert marker: it expands to its input unchanged.
+/// `ts-typegen-build`'s axum scanner reads its arguments from source text,
+/// never from macro expansion. A bare `#[ts_route]` with no arguments still
+/// works when `.routers(true)` is configured — the router scan supplies the
+/// path and method the attribute left out.
 #[cfg(feature = "axum")]
 pub use ts_typegen_macros::ts_route;
 
