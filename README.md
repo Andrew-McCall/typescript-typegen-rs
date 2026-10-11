@@ -209,10 +209,12 @@ ts-typegen-build = { version = "1", features = ["axum"] }
 ```
 
 `.axum(Axum::new()...)` opts a build into scanning for axum routes alongside
-the usual type scan. It emits `bindings/sender.ts` (the transport contract),
-`bindings/routes.ts` (every route as a type map), `bindings/client.ts` (the
-client factory), and one `bindings/client/<group>.ts` per route-bearing
-directory, alongside the type bindings you already get:
+the usual type scan. It always emits `bindings/sender.ts` (the transport
+contract) and `bindings/routes.ts` (every route as a type map), alongside
+the type bindings you already get; whether it also emits a callable
+`bindings/client.ts` (and, split by directory, one `bindings/client/<group>.ts`
+per route-bearing directory) depends on `.client(...)`, covered in
+[Generating a client](#generating-a-client) below:
 
 ```rust
 // build.rs
@@ -289,6 +291,36 @@ is no flat form — and overrides a path capture's inferred type, or, with
 route entirely; `fn_name = "fetchPatient"` overrides the generated function
 name; `prefix = false` opts one route out of a configured `.prefix(...)`.
 
+### Response and error types
+
+With no override, a handler's return type is unwrapped to find its
+response: `Json<T>` and `(StatusCode, T)` both unwrap to `T` (recursively,
+so `(StatusCode, Json<T>)` still reaches `T`); `()` or a bare `StatusCode`
+is void; `Result<T, E>` splits into the two before any of that runs, so the
+unwrapping still applies to its `Ok` arm.
+
+The unwrapped `T`'s final path segment — `PatientView` in `Json<PatientView>`
+— names the response. That name is trusted as a type reference, not
+re-derived, so it needs to either already be a registered `#[derive(Ts)]`
+type or resolve once the client imports it. An unannotated `impl
+IntoResponse` has no segment to read this way and drops the whole route with
+an error rather than guessing — give it an explicit `response = "..."`, or
+register it with `.map_response("IntoResponseWrapper", "ActualTsType")`,
+matched the same way `.extractor(...)` matches a type's final segment. Reach
+for `map_response` for a type you don't own, or one with no `Ts` derive of
+its own.
+
+`E` — present only when the handler returns `Result<T, E>` — resolves the
+same way, but never fails the route. Unresolved, it falls back to a
+configured `.error_type("ApiErrorBody")` default first (an API's error body
+is usually uniform, which is why the fallback is checked before giving up),
+and short of that, a bare guess at `E`'s own type name.
+
+An explicit `#[ts_route(response = "...")]` skips all of the above: it's
+parsed as a Rust type and lowered normally, so `"Vec<PatientView>"` becomes
+an array of refs; a string that isn't valid Rust type syntax — a TS union,
+say — is emitted verbatim instead of failing the route.
+
 ### Argument objects
 
 A generated client function takes one object argument, keyed by the Rust
@@ -310,6 +342,51 @@ same way. A query or body extractor always keys its argument `query` /
 Keys come from Rust, not a convention — this is deliberate, so a renamed
 Rust binding is a visible breaking change on the TypeScript side instead of a
 silent mismatch.
+
+### Generating a client
+
+`.client(Client)` picks whether and how the discovered routes turn into
+callable TypeScript, independently of finding and typing them:
+
+| `.client(..)` | Emits |
+|---|---|
+| `None` (default) | just `sender.ts` and `routes.ts` — the transport contract and the route type map, no call wrappers at all |
+| `Flat` | every route as one call wrapper in a single `client.ts` |
+| `Modules { strip }` | one `client/<group>.ts` per route-bearing directory, plus a `client.ts` root factory that re-exports each group |
+
+`None` is for a codebase that wants the types — `Routes`, `Sender`,
+`RouteResult` — but already has its own call layer and would rather not
+carry a second one it won't use.
+
+Under `Modules`, a route's `group` comes from its handler file's parent
+directory, relative to whichever `.scan(...)` root it falls under, with
+`strip` (if configured) removed from the front and each remaining segment
+camelCased. A handler in `src/handlers/patient/mod.rs`, scanned from `src`
+with `strip: Some("handlers")`, groups as `patient`; a handler directly
+under `handlers/` itself has nothing left after stripping and so has no
+group — it's emitted from the root `client.ts` instead of a `client/*.ts`
+file.
+
+The fixtures in this repo sit at opposite ends of the spectrum. `fixtures/macro-demo`
+is `#[ts_route]`-annotated with `Client::Modules { strip: Some("handlers") }`,
+the setup shown above. `fixtures/axum-demo` has no annotations anywhere —
+
+```rust
+// build.rs
+ts_typegen_build::Config::new()
+    .scan("src")
+    .output("bindings")
+    .axum(
+        ts_typegen_build::axum::config::Axum::new()
+            .discover(ts_typegen_build::axum::config::Discover::All)
+            .routers(true)
+            .client(ts_typegen_build::axum::config::Client::Flat),
+    )
+    .run()
+```
+
+— every route comes from actually walking its `Router::new().route(...).nest(...)`
+builder chains, and the whole client lands in one flat `client.ts`.
 
 ### `Sender` and `RouteResult`
 
