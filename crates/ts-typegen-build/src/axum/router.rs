@@ -359,20 +359,23 @@ fn method_filter_methods(expr: &syn::Expr, cfg: &Axum, loc: &SourceLoc, diags: &
 }
 
 /// Resolves a handler reference to its bare name and enclosing module's
-/// last segment. A reference matching no scanned `fn` at all is not an
-/// error -- none of this exists to validate the handler, only to name it --
-/// so it falls back to the reference's own written qualifier, or an empty
-/// module when it has none. Two or more scanned candidates tied for the
-/// longest matching module suffix is the only failure case, since there is
-/// then no way to tell which one the reference means.
+/// full path -- not just its last segment, which two scanned fns sharing a
+/// name and a module's last segment (but not its full path) could otherwise
+/// collide on in [`crate::axum::routes::handler_matches`]. A reference
+/// matching no scanned `fn` at all is not an error -- none of this exists to
+/// validate the handler, only to name it -- so it falls back to the
+/// reference's own written qualifier path, or an empty one when it has none.
+/// Two or more scanned candidates tied for the longest matching module
+/// suffix is the only failure case, since there is then no way to tell which
+/// one the reference means.
 fn resolve_handler(path: &syn::Path, fns: &[FnItem], loc: &SourceLoc, diags: &mut Diagnostics) -> Option<(String, String)> {
     let segs = path_segments(path);
     let name = segs.last()?.clone();
     let qualifiers = &segs[..segs.len() - 1];
     let candidates = find_candidates(&name, fns, false);
     match pick_longest_suffix(qualifiers, candidates) {
-        Ok(Some(f)) => Some((name, module_last_segment(&f.module_path))),
-        Ok(None) => Some((name, qualifiers.last().cloned().unwrap_or_default())),
+        Ok(Some(f)) => Some((name, f.module_path.clone())),
+        Ok(None) => Some((name, qualifiers.join("::"))),
         Err(winners) => {
             diags.push(ambiguous_diag(&name, &winners, loc));
             None
@@ -454,10 +457,6 @@ fn trailing_expr(item: &syn::ItemFn) -> Option<&syn::Expr> {
 
 fn fn_identity(f: &FnItem) -> String {
     format!("{}::{}", f.module_path, f.item.sig.ident)
-}
-
-pub(crate) fn module_last_segment(module_path: &str) -> String {
-    module_path.rsplit("::").next().unwrap_or(module_path).to_string()
 }
 
 fn path_segments(path: &syn::Path) -> Vec<String> {
@@ -544,7 +543,9 @@ mod tests {
     }
 
     fn handler_modules(f: &[RouteFact]) -> Vec<String> {
-        f.iter().filter_map(|x| x.handler.as_ref().map(|(_, module)| module.clone())).collect()
+        f.iter()
+            .filter_map(|x| x.handler.as_ref().map(|(_, module)| module.rsplit("::").next().unwrap().to_string()))
+            .collect()
     }
 
     fn collect_with_router_diag(attr_src: &str, router_src: &str) -> (Vec<Route>, Diagnostics) {

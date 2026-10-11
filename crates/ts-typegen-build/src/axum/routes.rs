@@ -13,7 +13,7 @@ use crate::attrs::RenameRule;
 use crate::axum::bind;
 use crate::axum::config::{Axum, Client, Discover, QueryArrays, RouteAttr};
 use crate::axum::path;
-use crate::axum::router::{facts_from_routers, module_last_segment};
+use crate::axum::router::facts_from_routers;
 use crate::config::Config;
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::ir::{Body, Method, Registry, Route, RouteParam, SourceLoc, Ty};
@@ -301,7 +301,7 @@ pub fn collect_routes(
             (None, Some(rf)) if axum.discovery() == Discover::All => rf.clone(),
             (None, Some(_)) => continue,
             (Some(af), None) => af,
-            (Some(af), Some(rf)) => match merge_router_fact(af, rf, diags) {
+            (Some(af), Some(rf)) => match merge_router_fact(af, rf, axum, diags) {
                 Some(merged) => merged,
                 None => continue,
             },
@@ -335,13 +335,7 @@ pub fn collect_routes(
             continue;
         };
 
-        let effective_path = match fact.overrides.prefix {
-            Some(false) => declared_path.clone(),
-            _ => match axum.prefix_for(declared_path) {
-                Some(prefix) => format!("/{}{}", prefix.trim_matches('/'), declared_path),
-                None => declared_path.clone(),
-            },
-        };
+        let effective_path = apply_prefix(declared_path, &fact.overrides, axum);
         let Some(segs) = path::parse_template(&effective_path, &fact.loc, diags) else { continue };
 
         let extracted = bind::classify(&f.item.sig, axum, ctx, &fact.loc, diags);
@@ -439,12 +433,28 @@ pub fn collect_routes(
 }
 
 /// Whether a router-sourced fact's resolved handler identity names `f`: its
-/// bare fn name, and its enclosing module's own last segment -- the same
+/// bare fn name, and its enclosing module's full path -- the same
 /// comparison [`crate::axum::router`] uses to decide which scanned `fn` a
-/// `.route(...)` handler reference means.
+/// `.route(...)` handler reference means. Comparing the full path, not just
+/// its last segment, is what keeps two same-named fns in different modules
+/// that happen to share a last segment from both matching one fact.
 fn handler_matches(rf: &RouteFact, f: &FnItem) -> bool {
     let Some((name, module)) = &rf.handler else { return false };
-    f.item.sig.ident == name.as_str() && module_last_segment(&f.module_path) == *module
+    f.item.sig.ident == name.as_str() && f.module_path == *module
+}
+
+/// The path `collect_routes` ends up building a route from: `declared_path`
+/// untouched when `overrides.prefix == Some(false)` opts this route out, or
+/// when no prefix is configured for it at all, otherwise `declared_path`
+/// with the configured [`Axum::prefix`] prepended.
+fn apply_prefix(declared_path: &str, overrides: &Overrides, axum: &Axum) -> String {
+    match overrides.prefix {
+        Some(false) => declared_path.to_string(),
+        _ => match axum.prefix_for(declared_path) {
+            Some(prefix) => format!("/{}{}", prefix.trim_matches('/'), declared_path),
+            None => declared_path.to_string(),
+        },
+    }
 }
 
 /// Combines an attribute fact with the router-sourced fact independently
@@ -455,7 +465,16 @@ fn handler_matches(rf: &RouteFact, f: &FnItem) -> bool {
 /// error naming both sites -- this drift check is the reason to run both
 /// sources at all, so it is treated the same as any other fatal mismatch:
 /// the route is dropped (`None`) rather than guessing which side is right.
-fn merge_router_fact(mut attr: RouteFact, router: &RouteFact, diags: &mut Diagnostics) -> Option<RouteFact> {
+///
+/// A router-sourced path is already composed through whatever real
+/// `.nest(...)` chain reached it, while the attribute's is always the bare
+/// value as written -- comparing them straight would see a configured
+/// prefix as drift every time. So the attribute's path is run through the
+/// same [`apply_prefix`] `collect_routes` applies downstream before either
+/// side is compared; on agreement, `attr.path` is left at its original,
+/// un-prefixed value so that downstream step still runs, instead of being
+/// overwritten with the router's already-prefixed one and prefixed twice.
+fn merge_router_fact(mut attr: RouteFact, router: &RouteFact, axum: &Axum, diags: &mut Diagnostics) -> Option<RouteFact> {
     let mut conflict = None;
 
     match (&attr.method, &router.method) {
@@ -464,8 +483,11 @@ fn merge_router_fact(mut attr: RouteFact, router: &RouteFact, diags: &mut Diagno
         _ => {}
     }
     match (&attr.path, &router.path) {
-        (Some(a), Some(r)) if a.trim_matches('/') != r.trim_matches('/') => {
-            conflict = conflict.or(Some(("path", a.clone(), r.clone())))
+        (Some(a), Some(r)) => {
+            let normalized = apply_prefix(a, &attr.overrides, axum);
+            if normalized.trim_matches('/') != r.trim_matches('/') {
+                conflict = conflict.or(Some(("path", a.clone(), r.clone())));
+            }
         }
         (None, Some(r)) => attr.path = Some(r.clone()),
         _ => {}
@@ -925,5 +947,90 @@ pub async fn search(Query(filter): Query<Filter>) -> Json<PatientView> { todo!()
         let (routes, d, _dir) = collect(&[("handlers/s/search.rs", src)], axum);
         assert_eq!(routes.len(), 1);
         assert!(d.is_empty(), "Csv settles it, so nothing is reported: {:?}", d.iter().collect::<Vec<_>>());
+    }
+}
+
+/// Covers [`merge_router_fact`]'s drift check between the two fact sources:
+/// an attribute's declared path and method against a router-resolved fact
+/// for the same handler.
+#[cfg(test)]
+mod collect_both_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::ir::Route;
+    use crate::lower::LowerCtx;
+    use crate::scan::scan_roots;
+
+    /// Writes `attr_src` and `router_src` into one file and scans it with
+    /// routers enabled and, when given, a configured prefix.
+    fn collect_both_with_prefix_diag(
+        attr_src: &str,
+        router_src: &str,
+        prefix: Option<&str>,
+    ) -> (Vec<Route>, Diagnostics) {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.rs"), format!("{attr_src}\n{router_src}\n")).unwrap();
+
+        let mut axum = Axum::new().routers(true);
+        if let Some(p) = prefix {
+            axum = axum.prefix(p);
+        }
+        let cfg = Config::new().scan(&src).output(dir.path().join("bindings")).axum(axum);
+        let mut diags = Diagnostics::default();
+        let scan = scan_roots(&[src.clone()], &LowerCtx::default(), &mut diags);
+        let (mut reg, fns) = scan.split();
+        collect_routes(&fns, &mut reg, &cfg, &LowerCtx::default(), &mut diags);
+        (reg.routes().to_vec(), diags)
+    }
+
+    fn collect_both_diag(attr_src: &str, router_src: &str) -> (Vec<Route>, Diagnostics) {
+        collect_both_with_prefix_diag(attr_src, router_src, None)
+    }
+
+    fn collect_both(attr_src: &str, router_src: &str) -> Vec<Route> {
+        let (routes, d) = collect_both_diag(attr_src, router_src);
+        assert!(!d.has_errors(), "unexpected errors: {:?}", d.iter().collect::<Vec<_>>());
+        routes
+    }
+
+    fn collect_both_with_prefix(attr_src: &str, router_src: &str, prefix: &str) -> Vec<Route> {
+        let (routes, d) = collect_both_with_prefix_diag(attr_src, router_src, Some(prefix));
+        assert!(!d.has_errors(), "unexpected errors: {:?}", d.iter().collect::<Vec<_>>());
+        routes
+    }
+
+    #[test]
+    fn agreeing_sources_produce_one_route() {
+        let routes = collect_both(
+            r#"#[ts_route(path = "/a", method = "GET")] async fn h() -> Json<A> {}"#,
+            "fn app() -> Router { Router::new().route(\"/a\", get(h)) }",
+        );
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn disagreeing_sources_are_an_error_naming_both_sites() {
+        let (routes, d) = collect_both_diag(
+            r#"#[ts_route(path = "/a", method = "GET")] async fn h() -> Json<A> {}"#,
+            "fn app() -> Router { Router::new().route(\"/b\", get(h)) }",
+        );
+        assert!(routes.is_empty());
+        assert!(d.has_errors());
+        let m = &d.iter().next().unwrap().message;
+        assert!(m.contains("/a") && m.contains("/b"), "both paths must appear: {m}");
+    }
+
+    #[test]
+    fn the_prefix_is_normalised_before_comparing() {
+        let routes = collect_both_with_prefix(
+            r#"#[ts_route(path = "/a", method = "GET")] async fn h() -> Json<A> {}"#,
+            "fn inner() -> Router { Router::new().route(\"/a\", get(h)) }
+fn app() -> Router { Router::new().nest(\"/v2\", inner()) }",
+            "v2",
+        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].path, "/v2/a");
     }
 }
